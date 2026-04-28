@@ -15,4 +15,8 @@ public class LogAnalysisResponse
     public string GroupId { get; set; } = string.Empty;
 
     public bool IsCached { get; set; }
+
+    public bool IsLowConfidence { get; set; }
+
+    public string? RawAIResponse { get; set; }
 }

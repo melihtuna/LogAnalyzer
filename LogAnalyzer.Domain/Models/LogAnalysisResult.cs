@@ -11,4 +11,6 @@ public class LogAnalysisResult
     public string Suggestion { get; set; } = string.Empty;
 
     public double Confidence { get; set; }
+
+    public string RawAIResponse { get; set; } = string.Empty;
 }

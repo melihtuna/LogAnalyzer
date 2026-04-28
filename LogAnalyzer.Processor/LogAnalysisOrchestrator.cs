@@ -13,7 +13,8 @@ public class LogAnalysisOrchestrator(
     INotificationService notificationService,
     ILogger<LogAnalysisOrchestrator> logger) : ILogAnalysisOrchestrator
 {
-    private static readonly TimeSpan AiTimeout = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan AiTimeout = TimeSpan.FromSeconds(8);
+    private const double AcceptedConfidenceThreshold = 0.3;
 
     public async Task<LogAnalysisResponse> AnalyzeAsync(LogRequest request, CancellationToken cancellationToken = default)
     {
@@ -43,7 +44,8 @@ public class LogAnalysisOrchestrator(
             allCached = false;
             var processedLog = logParser.ExtractErrorLinesOrFullLogs(logEntry);
             var groupId = groupingService.CreateGroupId(processedLog);
-            var aiResult = await AnalyzeWithRetryAsync(processedLog, cancellationToken);
+            var analysis = await AnalyzeWithRetryAsync(processedLog, cancellationToken);
+            var aiResult = analysis.Result;
 
             var record = new LogAnalysisRecord
             {
@@ -62,7 +64,7 @@ public class LogAnalysisOrchestrator(
             };
 
             await repository.AddAsync(record, cancellationToken);
-            responses.Add(Map(record, isCached: false));
+            responses.Add(Map(record, isCached: false, isLowConfidence: analysis.IsLowConfidence, rawAiResponse: request.IncludeRawAIResponse ? aiResult.RawAIResponse : null));
 
             if (string.Equals(record.Severity, "critical", StringComparison.OrdinalIgnoreCase))
             {
@@ -74,7 +76,7 @@ public class LogAnalysisOrchestrator(
         return AggregateResponses(responses, allCached);
     }
 
-    private static LogAnalysisResponse Map(LogAnalysisRecord record, bool isCached)
+    private static LogAnalysisResponse Map(LogAnalysisRecord record, bool isCached, bool isLowConfidence = false, string? rawAiResponse = null)
     {
         return new LogAnalysisResponse
         {
@@ -84,7 +86,9 @@ public class LogAnalysisOrchestrator(
             Suggestion = record.Suggestion,
             Confidence = record.Confidence,
             GroupId = record.GroupId,
-            IsCached = isCached
+            IsCached = isCached,
+            IsLowConfidence = isLowConfidence,
+            RawAIResponse = rawAiResponse
         };
     }
 
@@ -124,9 +128,10 @@ public class LogAnalysisOrchestrator(
         };
     }
 
-    private async Task<LogAnalysisResult> AnalyzeWithRetryAsync(string processedLog, CancellationToken cancellationToken)
+    private async Task<AnalysisOutcome> AnalyzeWithRetryAsync(string processedLog, CancellationToken cancellationToken)
     {
         Exception? lastError = null;
+        LogAnalysisResult? lowConfidenceResult = null;
 
         for (var attempt = 0; attempt < 2; attempt++)
         {
@@ -136,12 +141,14 @@ public class LogAnalysisOrchestrator(
             try
             {
                 var result = await logAnalyzerAi.AnalyzeAsync(processedLog, linkedCts.Token);
-                if (result.Confidence >= 0.5)
+                logger.LogInformation("AI response received on attempt {Attempt} with confidence {Confidence}.", attempt + 1, result.Confidence);
+
+                if (result.Confidence >= AcceptedConfidenceThreshold)
                 {
-                    return result;
+                    return new AnalysisOutcome(result, IsLowConfidence: false);
                 }
 
-                lastError = new InvalidOperationException("AI confidence below threshold.");
+                lowConfidenceResult = result;
                 logger.LogWarning("AI returned low confidence ({Confidence}) on attempt {Attempt}.", result.Confidence, attempt + 1);
             }
             catch (OperationCanceledException ex) when (timeoutCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
@@ -156,7 +163,15 @@ public class LogAnalysisOrchestrator(
             }
         }
 
-        return CreateFallbackResult(processedLog, lastError ?? new InvalidOperationException("AI analysis failed."));
+        if (lowConfidenceResult is not null)
+        {
+            logger.LogInformation("Returning AI result with low confidence {Confidence} without fallback.", lowConfidenceResult.Confidence);
+            return new AnalysisOutcome(lowConfidenceResult, IsLowConfidence: true);
+        }
+
+        var fallbackReason = lastError ?? new InvalidOperationException("AI analysis failed.");
+        logger.LogWarning(fallbackReason, "Fallback triggered due to AI exception/timeout/parsing failure.");
+        return new AnalysisOutcome(CreateFallbackResult(processedLog, fallbackReason), IsLowConfidence: false);
     }
 
     private static List<string> SplitLogEntries(string logs)
@@ -191,7 +206,14 @@ public class LogAnalysisOrchestrator(
             Suggestion = primary.Suggestion,
             Confidence = responses.Average(x => x.Confidence),
             GroupId = primary.GroupId,
-            IsCached = allCached
+            IsCached = allCached,
+            IsLowConfidence = responses.All(x => x.IsLowConfidence),
+            RawAIResponse = string.Join(
+                " | ",
+                responses
+                    .Select(x => x.RawAIResponse)
+                    .Where(x => !string.IsNullOrWhiteSpace(x))
+                    .Distinct())
         };
     }
 
@@ -205,4 +227,6 @@ public class LogAnalysisOrchestrator(
             _ => 1
         };
     }
+
+    private sealed record AnalysisOutcome(LogAnalysisResult Result, bool IsLowConfidence);
 }
