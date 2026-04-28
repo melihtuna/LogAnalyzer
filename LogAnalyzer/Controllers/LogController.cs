@@ -1,30 +1,30 @@
-namespace LogAnalyzer.Controllers
+using LogAnalyzer.Domain.Interfaces;
+using LogAnalyzer.Domain.Models;
+using LogAnalyzer.Processor.Queue;
+using Microsoft.AspNetCore.Mvc;
+
+namespace LogAnalyzer.Api.Controllers;
+
+[ApiController]
+[Route("api/log")]
+public class LogController(ILogAnalysisQueue logAnalysisQueue) : ControllerBase
 {
-    using LogAnalyzer.Models;
-    using LogAnalyzer.Services;
-    using Microsoft.AspNetCore.Mvc;
-
-    [ApiController]
-    [Route("api/log")]
-    public class LogController : ControllerBase
+    [HttpPost("analyze")]
+    public async Task<ActionResult<LogAnalysisResponse>> Analyze([FromBody] LogRequest request, CancellationToken cancellationToken)
     {
-        private readonly LogAnalysisService _logAnalysisService;
-
-        public LogController(LogAnalysisService logAnalysisService)
+        if (request is null || string.IsNullOrWhiteSpace(request.Logs))
         {
-            _logAnalysisService = logAnalysisService;
+            return BadRequest("Logs payload is required.");
         }
 
-        [HttpPost("analyze")]
-        public async Task<ActionResult<LogResponse>> Analyze([FromBody] LogRequest request, CancellationToken cancellationToken)
+        try
         {
-            if (request is null || string.IsNullOrWhiteSpace(request.Logs))
-            {
-                return BadRequest("Logs payload is required.");
-            }
-
-            var result = await _logAnalysisService.AnalyzeAsync(request, cancellationToken);
+            var result = await logAnalysisQueue.EnqueueAsync(request, cancellationToken);
             return Ok(result);
+        }
+        catch (QueueFullException ex)
+        {
+            return StatusCode(StatusCodes.Status429TooManyRequests, ex.Message);
         }
     }
 }

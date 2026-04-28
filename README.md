@@ -1,139 +1,140 @@
 # LogAnalyzer
 
-`LogAnalyzer`, ASP.NET Core Web API ile geliştirilmiş, log verilerini yapay zeka desteğiyle analiz eden bir backend servisidir. Uygulama, gelen logları ön işlemden geçirir, kritik satırları modele gönderir ve standart bir JSON formatında teknik analiz çıktısı üretir.
+`LogAnalyzer` is an AI-powered log intelligence backend built with ASP.NET Core Web API.
+It accepts logs, analyzes them with AI, applies safe fallbacks when AI fails, caches results per log entry, and returns a structured response.
 
-## Projenin Amacı
+## Current Phase (Updated Today)
 
-- Operasyon ve geliştirme ekiplerinin loglardan hızlı içgörü almasını sağlamak
-- Tekrarlayan ve kritik hataları daha net görünür kılmak
-- Yapay zekayı karar destek mekanizması olarak kullanarak kök neden analizini hızlandırmak
+The project is now in **Phase 2: AI-powered Log Intelligence System** with production-hardening updates:
 
-## Temel Özellikler
+- Layered architecture with separate projects
+- Per-log caching (not whole payload)
+- Background queue processing with bounded capacity
+- AI retry, timeout, and confidence-based fallback
+- Improved log grouping normalization
+- Critical severity webhook notification (non-blocking)
+- Frequency tracking (`Count`, `LastSeenUtc`) for repeated errors
 
-- `POST /api/log/analyze` endpoint’i
-- Katmanlı akış: `Controller -> Service -> AI Client -> Response`
-- Log ön işleme: sadece `ERROR` satırlarını çıkarma, yoksa tüm logu kullanma
-- Ollama uyumlu AI entegrasyonu: `http://localhost:11434/api/generate`
-- Hash tabanlı in-memory cache ile tekrar eden analizleri hızlandırma
-- `async/await` tabanlı asenkron işlem akışı
-- Dependency Injection ile gevşek bağlı, test edilebilir yapı
+## Solution Structure
 
-## Mimari Yapı
+- `LogAnalyzer/` -> `LogAnalyzer.Api` (HTTP API, DI, composition root)
+- `LogAnalyzer.Domain/` (models and interfaces)
+- `LogAnalyzer.Processor/` (orchestration, queue, background processing)
+- `LogAnalyzer.Infrastructure/` (EF Core persistence, parser, hashing, grouping, notifications)
+- `LogAnalyzer.AI/` (Ollama integration and JSON schema validation)
 
-Proje içinde sorumluluklar sınıflara ayrılmıştır:
+## Key Features
 
-- `Controllers/LogController.cs`
-  - HTTP isteğini alır, doğrular, servise yönlendirir.
-- `Services/LogAnalysisService.cs`
-  - İş kurallarını uygular.
-  - Cache kontrolü yapar.
-  - Log parser ve AI client çağrılarını orkestre eder.
-- `AI/AiClient.cs`
-  - Ollama `generate` endpoint’ine istek atar.
-  - Model çıktısını `LogResponse` yapısına dönüştürür.
-- `Tools/LogParser.cs`
-  - `ERROR` satırlarını ayıklar.
-- `Models/LogRequest.cs` ve `Models/LogResponse.cs`
-  - API sözleşmesini (request/response modelini) tanımlar.
+- `POST /api/log/analyze` endpoint
+- Async queue-based processing using `BackgroundService`
+- Bounded channel (`capacity: 1000`) with backpressure handling
+- Cache lookup by **hash per log entry**
+- Aggregated response for multi-line/multi-entry payloads
+- AI output contract:
+  - `severity` (`critical`, `high`, `medium`, `low`)
+  - `category`
+  - `summary`
+  - `suggestion`
+  - `confidence` (`0..1`)
+- AI resilience:
+  - timeout: `3s`
+  - retry: `1`
+  - fallback rules if AI fails or confidence remains low
+- Repeated-log tracking:
+  - `Count` increments
+  - `LastSeenUtc` updates
+- Critical alerts via webhook without blocking request flow
 
-## Kullanılan Teknolojiler
+## Tech Stack
 
 - .NET 8
 - ASP.NET Core Web API
+- Entity Framework Core (SQLite)
 - Swagger / OpenAPI
 - HttpClientFactory
-- Ollama (`llama3`)
+- Ollama (`llama3` default)
 
-## Gereksinimler
+## Requirements
 
 - .NET SDK 8+
-- Çalışan Ollama servisi
-- Yüklü model: `llama3`
+- Running Ollama service
+- Installed model (default: `llama3`)
 
-Model kontrolü için:
+Check model:
 
 ```powershell
 ollama list
 ```
 
-## Projeyi Çalıştırma
-
-1. Depoyu klonlayın:
+## Run the Project
 
 ```bash
 git clone <repo-url>
 cd LogAnalyzer
+dotnet run --project LogAnalyzer/LogAnalyzer.Api.csproj
 ```
 
-2. API projesine geçin:
+Swagger:
 
-```bash
-cd LogAnalyzer
-```
+- `https://localhost:7225/swagger` (or port from `Properties/launchSettings.json`)
 
-3. Uygulamayı başlatın:
+## Configuration
 
-```bash
-dotnet run
-```
+`LogAnalyzer/appsettings.json`:
 
-4. Swagger arayüzüne gidin:
+- `ConnectionStrings:LogAnalyzer` -> SQLite connection string
+- `Ollama:Endpoint` -> AI endpoint (default `http://localhost:11434/api/generate`)
+- `Ollama:Model` -> model name
+- `Webhook:Url` -> optional critical-alert webhook URL
 
-- `http://localhost:<port>/swagger`
-
-Not: Port, `Properties/launchSettings.json` dosyasındaki profile göre değişebilir.
-
-## API Kullanımı
+## API
 
 ### Endpoint
 
 - `POST /api/log/analyze`
 
-### Örnek İstek
+### Request
 
 ```json
 {
-  "logs": "2026-04-27 10:00:01 INFO startup\n2026-04-27 10:00:05 ERROR Database timeout on OrdersDb\n2026-04-27 10:00:08 WARN retrying"
+  "logs": "2026-04-28 10:15:32 ERROR NullReferenceException at UserService.GetUserById()\n2026-04-28 10:16:01 ERROR TimeoutException while connecting external API"
 }
 ```
 
-### Örnek Yanıt
+### Response (example)
 
 ```json
 {
-  "summary": "Database timeout error occurred while processing orders",
-  "rootCause": "OrdersDb connection timed out",
-  "severity": "High",
-  "suggestion": "Check database connections and consider implementing connection pooling or retry logic to mitigate timeouts"
+  "severity": "high",
+  "category": "application",
+  "summary": "Null reference and timeout errors detected in service flow.",
+  "suggestion": "Add null guards and review timeout/retry policy for external dependencies.",
+  "confidence": 0.72,
+  "groupId": "grp-4f23d19a8b2c",
+  "isCached": false
 }
 ```
 
-## Cache Stratejisi
+## Notes
 
-- Cache anahtarı: log metninin `SHA-256` hash değeri
-- Aynı log tekrar gönderildiğinde AI çağrısı yapılmadan sonuç cache’den döner
-- Bu yaklaşım yanıt süresini düşürür ve model çağrısı maliyetini azaltır
+- JSON requests must escape line breaks in `logs` as `\n`.
+- Queue saturation returns `429 Too Many Requests`.
+- AI-related failures do not crash processing; fallback classification is returned instead.
 
-## Prompt Yaklaşımı
+## Changelog
 
-Modelden aşağıdaki alanlarda teknik ve kısa analiz istenir:
+### 2026-04-28
 
-- `summary`
-- `rootCause`
-- `severity` (`Low`, `Medium`, `High`)
-- `suggestion`
+- Refactored to layered architecture: `LogAnalyzer.Api`, `LogAnalyzer.Domain`, `LogAnalyzer.Processor`, `LogAnalyzer.Infrastructure`, `LogAnalyzer.AI`.
+- Standardized AI output contract with strict JSON schema and validation.
+- Switched to per-log-entry caching and aggregate response generation.
+- Added bounded background queue (`capacity: 1000`) with backpressure and `429` handling.
+- Added AI timeout (`3s`), single retry, and safe fallback when AI fails or confidence is low.
+- Improved grouping normalization by removing timestamps, GUIDs, numeric IDs, and extra whitespace.
+- Made critical webhook notifications non-blocking and failure-tolerant.
+- Extended persistence model with `Count` and `LastSeenUtc` for repeated log tracking.
+- Fixed hosted service lifetime issue by resolving scoped orchestrator inside a created scope.
 
-Yanıtın yapılandırılmış JSON dönmesi hedeflenir.
+## License
 
-## Geliştirme Notları
-
-- Uygulama, tek servis odaklı basit bir başlangıç mimarisi sunar.
-- İlerleyen sürümlerde aşağıdaki iyileştirmeler eklenebilir:
-  - Kalıcı cache (`Redis`)
-  - Kimlik doğrulama ve oran sınırlama
-  - Gözlemlenebilirlik (structured logging, metrics, tracing)
-  - Entegrasyon ve yük testleri
-
-## Lisans
-
-Bu proje eğitim ve geliştirme amaçlıdır. Gerekirse depo politikalarınıza uygun bir lisans dosyası (`LICENSE`) ekleyebilirsiniz.
+This project is for learning and development purposes. Add or adjust `LICENSE` based on your repository policy.

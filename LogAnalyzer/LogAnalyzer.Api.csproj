@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>LogAnalyzer.Api</AssemblyName>
+    <RootNamespace>LogAnalyzer.Api</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Swashbuckle.AspNetCore" Version="6.6.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\LogAnalyzer.Domain\LogAnalyzer.Domain.csproj" />
+    <ProjectReference Include="..\LogAnalyzer.Infrastructure\LogAnalyzer.Infrastructure.csproj" />
+    <ProjectReference Include="..\LogAnalyzer.AI\LogAnalyzer.AI.csproj" />
+    <ProjectReference Include="..\LogAnalyzer.Processor\LogAnalyzer.Processor.csproj" />
+  </ItemGroup>
+</Project>
