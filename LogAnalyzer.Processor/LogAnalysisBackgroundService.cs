@@ -20,7 +20,7 @@ public class LogAnalysisBackgroundService(
             {
                 using var scope = scopeFactory.CreateScope();
                 var orchestrator = scope.ServiceProvider.GetRequiredService<ILogAnalysisOrchestrator>();
-                var result = await orchestrator.AnalyzeAsync(item.Request, item.CancellationToken);
+                var result = await orchestrator.AnalyzeAsync(item.LogProvider, item.IncludeRawAIResponse, item.CancellationToken);
                 item.CompletionSource.TrySetResult(result);
             }
             catch (OperationCanceledException ex)

@@ -1,5 +1,6 @@
 using System.Threading.Channels;
 using LogAnalyzer.Domain.Interfaces;
+using LogAnalyzer.Domain.Providers;
 using LogAnalyzer.Domain.Models;
 
 namespace LogAnalyzer.Processor.Queue;
@@ -8,12 +9,18 @@ public class ChannelLogAnalysisQueue(Channel<QueuedLogAnalysisRequest> channel) 
 {
     private static readonly TimeSpan QueueWaitTimeout = TimeSpan.FromMilliseconds(200);
 
-    public async Task<LogAnalysisResponse> EnqueueAsync(LogRequest request, CancellationToken cancellationToken = default)
+    public async Task<LogAnalysisResponse> EnqueueAsync(ILogProvider logProvider, bool includeRawAIResponse, CancellationToken cancellationToken = default)
     {
+        if (logProvider is null)
+        {
+            throw new ArgumentNullException(nameof(logProvider));
+        }
+
         var completionSource = new TaskCompletionSource<LogAnalysisResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
         var queuedRequest = new QueuedLogAnalysisRequest
         {
-            Request = request,
+            LogProvider = logProvider,
+            IncludeRawAIResponse = includeRawAIResponse,
             CompletionSource = completionSource,
             CancellationToken = cancellationToken
         };
@@ -39,5 +46,15 @@ public class ChannelLogAnalysisQueue(Channel<QueuedLogAnalysisRequest> channel) 
 
         using var registration = cancellationToken.Register(() => completionSource.TrySetCanceled(cancellationToken));
         return await completionSource.Task;
+    }
+
+    public async Task<LogAnalysisResponse> EnqueueAsync(LogRequest request, CancellationToken cancellationToken = default)
+    {
+        if (request is null)
+        {
+            throw new ArgumentNullException(nameof(request));
+        }
+
+        return await EnqueueAsync(new StaticLogProvider(request.Logs), request.IncludeRawAIResponse, cancellationToken);
     }
 }

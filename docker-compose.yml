@@ -1,0 +1,57 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: loganalyzer
+      POSTGRES_USER: loganalyzer
+      POSTGRES_PASSWORD: loganalyzer
+    ports:
+      - "5432:5432"
+    networks:
+      - log-analyzer-network
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: loganalyzer-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+    networks:
+      - log-analyzer-network
+
+  mock-log-producer:
+    build:
+      context: ./mock-log-producer
+      dockerfile: Dockerfile
+    container_name: mock-log-producer
+    logging:
+      driver: gelf
+      options:
+        gelf-address: ${GRAYLOG_GELF_ADDRESS:-udp://host.docker.internal:12201}
+        tag: mock-log-producer
+    networks:
+      - log-analyzer-network
+
+  log-analyzer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+      - mock-log-producer
+    environment:
+      ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=loganalyzer;Username=loganalyzer;Password=loganalyzer
+    ports:
+      - "8080:8080"
+    networks:
+      - log-analyzer-network
+
+networks:
+  log-analyzer-network:
+    driver: bridge

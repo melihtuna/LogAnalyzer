@@ -16,6 +16,20 @@ public class LogAnalysisOrchestrator(
     private static readonly TimeSpan AiTimeout = TimeSpan.FromSeconds(8);
     private const double AcceptedConfidenceThreshold = 0.3;
 
+    public async Task<LogAnalysisResponse> AnalyzeAsync(ILogProvider logProvider, bool includeRawAIResponse, CancellationToken cancellationToken = default)
+    {
+        if (logProvider is null)
+        {
+            throw new ArgumentNullException(nameof(logProvider));
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        var logs = await logProvider.GetLogsAsync();
+        cancellationToken.ThrowIfCancellationRequested();
+
+        return await AnalyzeInternalAsync(logs, includeRawAIResponse, cancellationToken);
+    }
+
     public async Task<LogAnalysisResponse> AnalyzeAsync(LogRequest request, CancellationToken cancellationToken = default)
     {
         if (request is null || string.IsNullOrWhiteSpace(request.Logs))
@@ -23,7 +37,12 @@ public class LogAnalysisOrchestrator(
             throw new ArgumentException("Logs payload is required.", nameof(request));
         }
 
-        var logEntries = SplitLogEntries(request.Logs);
+        return await AnalyzeInternalAsync(request.Logs, request.IncludeRawAIResponse, cancellationToken);
+    }
+
+    private async Task<LogAnalysisResponse> AnalyzeInternalAsync(string logs, bool includeRawAIResponse, CancellationToken cancellationToken)
+    {
+        var logEntries = SplitLogEntries(logs);
         var responses = new List<LogAnalysisResponse>(logEntries.Count);
         var allCached = true;
 
@@ -64,7 +83,7 @@ public class LogAnalysisOrchestrator(
             };
 
             await repository.AddAsync(record, cancellationToken);
-            responses.Add(Map(record, isCached: false, isLowConfidence: analysis.IsLowConfidence, rawAiResponse: request.IncludeRawAIResponse ? aiResult.RawAIResponse : null));
+            responses.Add(Map(record, isCached: false, isLowConfidence: analysis.IsLowConfidence, rawAiResponse: includeRawAIResponse ? aiResult.RawAIResponse : null));
 
             if (string.Equals(record.Severity, "critical", StringComparison.OrdinalIgnoreCase))
             {

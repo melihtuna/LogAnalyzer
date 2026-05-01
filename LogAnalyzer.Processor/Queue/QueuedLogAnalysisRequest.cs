@@ -1,11 +1,14 @@
 using System.Threading.Channels;
 using LogAnalyzer.Domain.Models;
+using LogAnalyzer.Domain.Interfaces;
 
 namespace LogAnalyzer.Processor.Queue;
 
 public class QueuedLogAnalysisRequest
 {
-    public required LogRequest Request { get; init; }
+    public required ILogProvider LogProvider { get; init; }
+
+    public required bool IncludeRawAIResponse { get; init; }
 
     public required TaskCompletionSource<LogAnalysisResponse> CompletionSource { get; init; }
 

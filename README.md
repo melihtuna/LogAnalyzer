@@ -1,127 +1,167 @@
 # LogAnalyzer
 
-`LogAnalyzer` is an AI-powered log intelligence backend built with ASP.NET Core Web API.
-It accepts logs, analyzes them with AI, applies safe fallbacks when AI fails, caches results per log entry, and returns a structured response.
+**LogAnalyzer** is a .NET 8 backend that combines **central log retrieval**, **structured persistence**, and **OpenAI-assisted analysis**. It supports an on-demand HTTP API for ad-hoc log payloads and a **scheduled pipeline** that pulls from **Graylog**, calls **OpenAI Chat Completions** once per batch (with caching), and stores aggregate runs for review.
 
-## Current Phase (Updated 2026-04-28)
+---
 
-The project is now in **Phase 2: AI-powered Log Intelligence System** with production-hardening updates:
+## Overview
 
-- Layered architecture with separate projects
-- Per-log caching (not whole payload)
-- Background queue processing with bounded capacity
-- AI retry, timeout, and confidence-based fallback
-- Improved log grouping normalization
-- Critical severity webhook notification (non-blocking)
-- Frequency tracking (`Count`, `LastSeenUtc`) for repeated errors
+| Path | Role |
+|------|------|
+| **API** | Clients submit raw log text; the service fingerprints lines, uses cache when possible, and enqueues analysis through a bounded channel. |
+| **Periodic job** | A hosted service fetches logs from Graylog, deduplicates by line hash, batches uncached lines, calls OpenAI for a **single consolidated summary**, and writes results to PostgreSQL. |
+| **Persistence** | `LogAnalyses` cache (unique `LogHash`), `LogAnalysisRuns` snapshots, optional Graylog checkpoint metadata. |
 
-## Solution Structure
+The AI layer is tuned for **operator summaries**: one JSON result describing themes, severity, and **actionable remediation** (including file/line hints when stack traces are present). Legacy multi-object model output is merged server-side when needed.
 
-- `LogAnalyzer/` -> `LogAnalyzer.Api` (HTTP API, DI, composition root)
-- `LogAnalyzer.Domain/` (models and interfaces)
-- `LogAnalyzer.Processor/` (orchestration, queue, background processing)
-- `LogAnalyzer.Infrastructure/` (EF Core persistence, parser, hashing, grouping, notifications)
-- `LogAnalyzer.AI/` (Ollama integration and JSON schema validation)
+---
 
-## Key Features
+## Solution layout
 
-- `POST /api/log/analyze` endpoint
-- Async queue-based processing using `BackgroundService`
-- Bounded channel (`capacity: 1000`) with backpressure handling
-- Cache lookup by **hash per log entry**
-- Aggregated response for multi-line/multi-entry payloads
-- AI output contract:
-  - `severity` (`critical`, `high`, `medium`, `low`)
-  - `category`
-  - `summary`
-  - `suggestion`
-  - `confidence` (`0..1`)
-- AI resilience:
-  - timeout: `3s`
-  - retry: `1`
-  - fallback rules if AI fails or confidence remains low
-- Repeated-log tracking:
-  - `Count` increments
-  - `LastSeenUtc` updates
-- Critical alerts via webhook without blocking request flow
+| Project | Responsibility |
+|---------|----------------|
+| `LogAnalyzer.Api` | ASP.NET Core host, DI, Swagger, controllers. |
+| `LogAnalyzer.Domain` | Models, `ILogProvider`, repositories, orchestration contracts. |
+| `LogAnalyzer.Processor` | Queue consumer, `LogAnalysisOrchestrator`, `PeriodicLogAnalysisBackgroundService`. |
+| `LogAnalyzer.Infrastructure` | EF Core (PostgreSQL), Graylog HTTP provider, repositories, parsers, grouping. |
+| `LogAnalyzer.AI` | `OpenAiLogAnalyzer` — Chat Completions, rate-limit handling, response parsing. |
+| `mock-log-producer` | Optional console app emitting realistic, stack-trace–style logs to Graylog via GELF. |
 
-## Tech Stack
+---
 
-- .NET 8
-- ASP.NET Core Web API
-- Entity Framework Core (SQLite)
-- Swagger / OpenAPI
-- HttpClientFactory
-- Ollama (`llama3` default)
+## Features
 
-## Requirements
+- **OpenAI Chat Completions** (configurable model; default suitable for cost-sensitive workloads).
+- **Per-line fingerprint cache** for API-driven analysis; **batch-hash cache** for periodic Graylog cycles (one row per OpenAI batch, not per duplicated summary).
+- **Bounded async queue** for `/api/log/analyze` with back-pressure (`429` when full).
+- **Graylog** integration: query window, pagination, authentication options aligned with your deployment.
+- **PostgreSQL** via EF Core (`EnsureCreated` on startup in current template — consider migrations for production).
+- **Run history API**: latest periodic/OpenAI snapshots via `GET /log-analysis`.
+- **Operational logging**: outbound prompt body (length-capped), assistant reply snippets, structured handling of `429` / quota-related errors.
 
-- .NET SDK 8+
-- Running Ollama service
-- Installed model (default: `llama3`)
+---
 
-Check model:
+## Tech stack
 
-```powershell
-ollama list
-```
+- .NET 8, ASP.NET Core Web API  
+- Entity Framework Core + **Npgsql**  
+- **OpenAI** HTTP API (`chat/completions`)  
+- **Graylog** (REST search + optional GELF from mock producer)  
+- Docker Compose (Postgres, PgAdmin, API image, mock producer)
 
-## Run the Project
+---
 
-```bash
-git clone <repo-url>
-cd LogAnalyzer
-dotnet run --project LogAnalyzer/LogAnalyzer.Api.csproj
-```
+## Prerequisites
 
-Swagger:
+- [.NET SDK 8](https://dotnet.microsoft.com/download/dotnet/8.0)+  
+- **PostgreSQL** (local or container)  
+- **OpenAI API key** with billing/quota appropriate for your tier  
+- **Graylog** reachable from the API (host networking differs for Docker vs localhost — see `.env.example`)
 
-- `https://localhost:7225/swagger` (or port from `Properties/launchSettings.json`)
+---
 
 ## Configuration
 
-`LogAnalyzer/appsettings.json`:
+Secrets should live in **environment variables** or **`.env`** (Compose); avoid committing real keys.
 
-- `ConnectionStrings:LogAnalyzer` -> SQLite connection string
-- `Ollama:Endpoint` -> AI endpoint (default `http://localhost:11434/api/generate`)
-- `Ollama:Model` -> model name
-- `Webhook:Url` -> optional critical-alert webhook URL
+### Core keys
 
-## API
+| Key | Purpose |
+|-----|---------|
+| `ConnectionStrings:DefaultConnection` | PostgreSQL connection string |
+| `OpenAI:ApiKey` | Bearer token for OpenAI |
+| `OpenAI:Model` | Chat model id (e.g. `gpt-4o-mini`) |
+| `OpenAI:MaxLogCharacters` | Max characters of log payload embedded in the user prompt |
+| `OpenAI:MaxPromptLogCharacters` | Max characters of the **logged** prompt copy (Docker/stdout); does not truncate the HTTP body unless you align truncation separately via `MaxLogCharacters` |
+| `Graylog:BaseUrl` | Graylog root URL |
+| `Graylog:ApiToken` | API token or credential expected by your Graylog setup |
+| `PeriodicAnalysis:IntervalMinutes` | Periodic Graylog/OpenAI cycle interval |
+| `PeriodicAnalysis:MaxDistinctLines` | Cap distinct lines per cycle |
+| `PeriodicAnalysis:MaxLinesSentToOpenAi` | Max uncached lines sent in one OpenAI batch |
 
-### Endpoint
+Copy `.env.example` → `.env` and adjust. Compose wires DB URL explicitly for `log-analyzer`; OpenAI and Graylog typically come from `env_file: .env`.
 
-- `POST /api/log/analyze`
+---
 
-### Request
+## Run locally
+
+1. Start PostgreSQL and ensure `ConnectionStrings:DefaultConnection` matches.  
+2. Set `OpenAI:ApiKey`, `Graylog:BaseUrl`, `Graylog:ApiToken` (user secrets, env, or `appsettings.Development.json` — never commit secrets).  
+3. From the repository root:
+
+```bash
+dotnet run --project LogAnalyzer/LogAnalyzer.Api.csproj
+```
+
+Swagger (Development):
+
+- HTTPS profile: `https://localhost:7225/swagger`  
+- HTTP: `http://localhost:5294/swagger`
+
+---
+
+## Run with Docker Compose
+
+Graylog itself is **not** defined in the bundled Compose file (often installed separately). The stack brings up **PostgreSQL**, **PgAdmin**, the **API**, and the **mock log producer** (GELF target configurable).
+
+```bash
+cp .env.example .env
+# Edit .env with OpenAI key and Graylog base URL / token and GELF address
+docker compose up --build
+```
+
+- API: `http://localhost:8080`  
+- Swagger in Development builds only (adjust `ASPNETCORE_ENVIRONMENT` if you need UI in containers).
+
+Ensure `GRAYLOG_GELF_ADDRESS` matches your Graylog GELF UDP input when using `mock-log-producer`.
+
+---
+
+## HTTP API
+
+### Analyze logs (on-demand)
+
+`POST /api/log/analyze`
 
 ```json
 {
-  "logs": "2026-04-28 10:15:32 ERROR NullReferenceException at UserService.GetUserById()\n2026-04-28 10:16:01 ERROR TimeoutException while connecting external API"
+  "logs": "ERROR NullReferenceException at Example()\nWARN Dependency timeout",
+  "includeRawAIResponse": false
 }
 ```
 
-### Response (example)
+Multi-line bodies must use escaped `\n` inside JSON strings. Queue exhaustion returns **429 Too Many Requests**.
 
-```json
-{
-  "severity": "high",
-  "category": "application",
-  "summary": "Null reference and timeout errors detected in service flow.",
-  "suggestion": "Add null guards and review timeout/retry policy for external dependencies.",
-  "confidence": 0.72,
-  "groupId": "grp-4f23d19a8b2c",
-  "isCached": false
-}
-```
+### Latest analysis runs
 
-## Notes
+`GET /log-analysis`
 
-- JSON requests must escape line breaks in `logs` as `\n`.
-- Queue saturation returns `429 Too Many Requests`.
-- AI-related failures do not crash processing; fallback classification is returned instead.
+Returns persisted snapshots (`LogAnalysisRuns`) from the periodic pipeline / stored analyses.
+
+---
+
+## Security notes
+
+- Rotate any API keys that were ever committed to git.  
+- Prefer **environment-specific** configuration over checked-in `appsettings.json` secrets.  
+- Logged prompts may contain **PII or secrets** if present in source logs — tune `OpenAI:MaxPromptLogCharacters` or log levels accordingly.
+
+---
+
+## License
+
+This project is intended for learning and development. Align `LICENSE` with your organization’s policy.
+
+---
 
 ## Changelog
+
+### 2026-05-01
+
+- Documented **OpenAI-only** setup (replacing earlier Ollama-oriented instructions in historical README revisions).
+- Described **PostgreSQL**, **Graylog**, **Docker Compose**, and **`mock-log-producer`** realistic stack-trace style logs.
+- Documented **periodic batch analysis**, **batch-hash deduplication** for `LogAnalyses`, and **aggregate AI prompt** behavior with optional multi-fragment merge.
+- Added operational notes for **prompt/response logging**, **`OpenAI:MaxPromptLogCharacters`**, and rate-limit / billing-aware **429** handling.
 
 ### 2026-04-28
 
@@ -134,7 +174,3 @@ Swagger:
 - Made critical webhook notifications non-blocking and failure-tolerant.
 - Extended persistence model with `Count` and `LastSeenUtc` for repeated log tracking.
 - Fixed hosted service lifetime issue by resolving scoped orchestrator inside a created scope.
-
-## License
-
-This project is for learning and development purposes. Add or adjust `LICENSE` based on your repository policy.

@@ -1,5 +1,6 @@
 using LogAnalyzer.Domain.Interfaces;
 using LogAnalyzer.Domain.Models;
+using LogAnalyzer.Domain.Providers;
 using LogAnalyzer.Processor.Queue;
 using Microsoft.AspNetCore.Mvc;
 
@@ -19,7 +20,10 @@ public class LogController(ILogAnalysisQueue logAnalysisQueue) : ControllerBase
 
         try
         {
-            var result = await logAnalysisQueue.EnqueueAsync(request, cancellationToken);
+            var result = await logAnalysisQueue.EnqueueAsync(
+                new StaticLogProvider(request.Logs),
+                request.IncludeRawAIResponse,
+                cancellationToken);
             return Ok(result);
         }
         catch (QueueFullException ex)

@@ -4,5 +4,6 @@ namespace LogAnalyzer.Domain.Interfaces;
 
 public interface ILogAnalysisOrchestrator
 {
+    Task<LogAnalysisResponse> AnalyzeAsync(ILogProvider logProvider, bool includeRawAIResponse, CancellationToken cancellationToken = default);
     Task<LogAnalysisResponse> AnalyzeAsync(LogRequest request, CancellationToken cancellationToken = default);
 }

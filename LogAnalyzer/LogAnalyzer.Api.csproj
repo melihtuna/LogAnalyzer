@@ -9,6 +9,10 @@
 
   <ItemGroup>
     <PackageReference Include="Swashbuckle.AspNetCore" Version="6.6.2" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="8.0.11">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
   </ItemGroup>
 
   <ItemGroup>
@@ -16,5 +20,14 @@
     <ProjectReference Include="..\LogAnalyzer.Infrastructure\LogAnalyzer.Infrastructure.csproj" />
     <ProjectReference Include="..\LogAnalyzer.AI\LogAnalyzer.AI.csproj" />
     <ProjectReference Include="..\LogAnalyzer.Processor\LogAnalyzer.Processor.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\Dockerfile">
+      <Link>Dockerfile</Link>
+    </None>
+    <None Include="..\docker-compose.yml">
+      <Link>docker-compose.yml</Link>
+    </None>
   </ItemGroup>
 </Project>

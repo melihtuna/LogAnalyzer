@@ -4,4 +4,5 @@
   <Project Path="LogAnalyzer.Infrastructure/LogAnalyzer.Infrastructure.csproj" />
   <Project Path="LogAnalyzer.AI/LogAnalyzer.AI.csproj" />
   <Project Path="LogAnalyzer.Processor/LogAnalyzer.Processor.csproj" />
+  <Project Path="mock-log-producer/MockLogProducer.csproj" />
 </Solution>
