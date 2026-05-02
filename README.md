@@ -158,10 +158,53 @@ This project is intended for learning and development. Align `LICENSE` with your
 
 ### 2026-05-01
 
-- Documented **OpenAI-only** setup (replacing earlier Ollama-oriented instructions in historical README revisions).
-- Described **PostgreSQL**, **Graylog**, **Docker Compose**, and **`mock-log-producer`** realistic stack-trace style logs.
-- Documented **periodic batch analysis**, **batch-hash deduplication** for `LogAnalyses`, and **aggregate AI prompt** behavior with optional multi-fragment merge.
-- Added operational notes for **prompt/response logging**, **`OpenAI:MaxPromptLogCharacters`**, and rate-limit / billing-aware **429** handling.
+**Persistence & data model**
+
+- Replaced SQLite-oriented hosting with **PostgreSQL** via **EF Core + Npgsql** (`ConnectionStrings:DefaultConnection`).
+- Expanded schema beyond ad-hoc cache: **`LogAnalyses`** (`LogAnalysisRecord`, unique **`LogHash`** index), **`LogAnalysisRuns`** (serialized periodic/API-style snapshots), and **`LogSourceCheckpoints`** (incremental Graylog cursor per source).
+- Application startup uses **`Database.EnsureCreated()`** in the current template (documented trade-off vs migrations for production).
+
+**Log ingestion (Graylog)**
+
+- Introduced **`ILogProvider`** with **`GraylogLogProvider`**: REST relative search, pagination, bounded result size, timeouts, and HTTP retries aligned with `GraylogOptions`.
+- Wired **HTTP Basic** credentials for Graylog API calls where required; resilient extraction of human-readable message text (including `message` field fallbacks typical of Graylog payloads).
+- Optional **checkpoint** persistence so incremental reads do not blindly advance on empty cycles.
+
+**AI layer (OpenAI, not Ollama)**
+
+- **`OpenAiLogAnalyzer`** implements **`ILogAnalyzerAI`** using **`HttpClient`** against **`/v1/chat/completions`** (no Semantic Kernel).
+- **`OpenAI:Model`** is configurable; outbound log payload size capped via **`OpenAI:MaxLogCharacters`** before embedding in the user prompt.
+- **Rate limits & billing**: differentiated **`429`** handling—`Retry-After` when present, exponential backoff otherwise, early termination on **`insufficient_quota`** / **`billing_hard_limit_reached`**, and explicit log guidance toward organization billing/limits URLs.
+- **Response parsing**: robust extraction of the first balanced JSON object; support for **JSON arrays** or **multiple comma-separated objects** by merging into a single `LogAnalysisResult`; `JsonException` falls back to heuristic classification.
+- **Prompt contract** shifted to a **single consolidated assessment** across batched logs (operator summary), with instructions to surface **stack-derived file:line hints** and **concrete remediation** tied to code locations.
+
+**Processor & orchestration**
+
+- Added **`PeriodicLogAnalysisBackgroundService`**: pulls logs from Graylog on a configurable interval, **deduplicates lines by fingerprint**, splits **cached vs uncached**, caps lines sent to OpenAI, and persists **`LogAnalysisRuns`**.
+- **Startup behavior**: first analysis cycle runs **immediately** after host start, then waits `PeriodicAnalysis:IntervalMinutes` (no “silent first interval” gap).
+- **Scoped dependencies in singleton hosted services**: periodic path uses **`IServiceScopeFactory`** so repositories and EF contexts resolve correctly per operation.
+- **Cache semantics split by path**:
+  - **API** (`LogAnalysisOrchestrator`): still **per log line hash** for on-demand `POST /api/log/analyze`.
+  - **Periodic**: **one `LogAnalyses` row per OpenAI batch** using a **stable sorted multi-line payload hash** (avoids N duplicate rows sharing identical AI fields); cache hit increments `Count` / `LastSeenUtc` on that batch row.
+
+**API & configuration surface**
+
+- **`Program` validation** for required **`OpenAI:ApiKey`**, **`Graylog:BaseUrl`**, **`Graylog:ApiToken`** at startup.
+- **`GET /log-analysis`** endpoint (`LogAnalysisController`) exposing latest persisted runs from **`LogAnalysisRuns`**.
+- **Environment-first configuration**: `.env` / Compose-friendly keys (`OpenAI__*`, `Graylog__*`, `PeriodicAnalysis__*`, `GRAYLOG_GELF_ADDRESS`) documented in **`.env.example`**.
+
+**Observability**
+
+- Structured **Information** logs for OpenAI **request dimensions**, **full prompt body** (length-capped via **`OpenAI:MaxPromptLogCharacters`** for Docker/stdout safety), and **assistant output** snippets (with response `id` when returned).
+
+**Developer experience & fixtures**
+
+- **`docker-compose.yml`**: PostgreSQL, PgAdmin, **`log-analyzer`** image build, and **`mock-log-producer`** with configurable **GELF** sink (Graylog itself remains an external dependency in the default compose).
+- **`mock-log-producer`** rewritten to emit **production-shaped** log lines: ISO timestamps, service names, `trace_id` / `span_id`, HTTP paths, and **multi-line stack traces** with **`at … in /src/.../File.cs:line N`** style frames for realistic AI evaluation.
+
+**Documentation**
+
+- README rewritten for the **OpenAI + PostgreSQL + Graylog + Docker** architecture; this changelog entry captures the substantive runtime and schema deltas that the short May 1 list previously summarized.
 
 ### 2026-04-28
 
