@@ -5,6 +5,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>LogAnalyzer.Api</AssemblyName>
     <RootNamespace>LogAnalyzer.Api</RootNamespace>
+    <UserSecretsId>b8f4e5c2-1a3d-4f6e-9b2c-8e7d6c5b4a31</UserSecretsId>
   </PropertyGroup>
 
   <ItemGroup>
@@ -20,6 +21,7 @@
     <ProjectReference Include="..\LogAnalyzer.Infrastructure\LogAnalyzer.Infrastructure.csproj" />
     <ProjectReference Include="..\LogAnalyzer.AI\LogAnalyzer.AI.csproj" />
     <ProjectReference Include="..\LogAnalyzer.Processor\LogAnalyzer.Processor.csproj" />
+    <ProjectReference Include="..\LogAnalyzer.ServiceDefaults\LogAnalyzer.ServiceDefaults.csproj" />
   </ItemGroup>
 
   <ItemGroup>
@@ -29,5 +31,7 @@
     <None Include="..\docker-compose.yml">
       <Link>docker-compose.yml</Link>
     </None>
+    <Content Remove="configuration.template.json" />
+    <None Include="configuration.template.json" />
   </ItemGroup>
 </Project>

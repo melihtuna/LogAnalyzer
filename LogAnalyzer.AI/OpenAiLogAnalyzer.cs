@@ -1,6 +1,7 @@
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
+using LogAnalyzer.AI.Classification;
 using LogAnalyzer.Domain.Interfaces;
 using LogAnalyzer.Domain.Models;
 using Microsoft.Extensions.Configuration;
@@ -8,7 +9,7 @@ using Microsoft.Extensions.Logging;
 
 namespace LogAnalyzer.AI;
 
-public class OpenAiLogAnalyzer(
+public partial class OpenAiLogAnalyzer(
     HttpClient httpClient,
     IConfiguration configuration,
     ILogger<OpenAiLogAnalyzer> logger) : ILogAnalyzerAI
@@ -36,26 +37,20 @@ public class OpenAiLogAnalyzer(
 You are a senior .NET backend engineer. The input may contain multiple log lines or distinct incidents.
 
 The operator already reads raw logs. Your job is a single consolidated assessment: themes across the batch,
-overall risk, and prioritized remediation—not a per-line transcript.
+overall risk, prioritized remediation, and the most likely root cause—not a per-line transcript.
 
-Return exactly ONE JSON object matching this schema (no JSON array, no comma-separated objects, no markdown):
-{
-  "severity": "critical|high|medium|low",
-  "category": "database|auth|network|timeout|application|unknown",
-  "summary": "synthesized narrative covering all signals (correlations, blast radius, dominant failures)",
-  "suggestion": "ordered, actionable steps addressing the whole batch",
-  "confidence": 0.0
-}
+Return ONLY one JSON object (no markdown fences, no prose before or after, no JSON array).
+Allowed root keys exactly:
+schema_version, severity, category, technical_summary, possible_root_cause, recommended_action, confidence.
 
-Rules:
-- severity must reflect the worst level implied across all logs.
-- If multiple domains appear, pick the dominant category or use "application".
-- summary must integrate all notable issues in one narrative (not a bullet list of separate JSON rows).
-- When stack traces exist, explicitly mention the most suspicious code locations as file:line hints in summary.
-- suggestion must contain prioritized remediation steps tied to concrete code locations (e.g., "OrderController.cs:118 add null guard").
-- Use lowercase for severity and category.
-- Confidence must be between 0 and 1.
-- Output only that one JSON object and nothing else.
+Field rules:
+- schema_version must be "1".
+- severity must be one of: critical, high, medium, low.
+- category must be one of: backend, ui, database, infrastructure, authentication, external_service, network, unknown.
+- technical_summary: single narrative integrating dominant failures and blast radius; mention file:line hints when stack traces exist.
+- possible_root_cause: best hypothesis; if uncertain, state uncertainty explicitly in one sentence.
+- recommended_action: prioritized actionable steps tied to concrete locations when possible.
+- confidence: JSON number between 0 and 1.
 
 Logs:
 """
@@ -74,55 +69,7 @@ Logs:
             promptBodyLogMax,
             TruncateForLog(prompt, promptBodyLogMax));
 
-        using var request = new HttpRequestMessage(HttpMethod.Post, ChatCompletionsEndpoint)
-        {
-            Content = JsonContent.Create(new
-            {
-                model,
-                messages = new[]
-                {
-                    new { role = "user", content = prompt }
-                }
-            })
-        };
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
-
-        using var response = await SendWithRateLimitRetryAsync(request, cancellationToken);
-        var responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
-        if (!response.IsSuccessStatusCode)
-        {
-            var (errCode, errMessage, _) = ParseOpenAiError(responseBody);
-            logger.LogError(
-                "OpenAI HTTP {StatusCode}: code={ErrorCode}, message={ErrorMessage}, body={BodySnippet}",
-                (int)response.StatusCode,
-                errCode ?? "(none)",
-                TruncateForLog(errMessage),
-                TruncateForLog(responseBody, 800));
-            throw new InvalidOperationException(
-                $"OpenAI API failed ({(int)response.StatusCode}). code={errCode}; {errMessage ?? responseBody}");
-        }
-
-        using var envelopeDocument = JsonDocument.Parse(responseBody);
-
-        var aiOutput = envelopeDocument.RootElement
-            .GetProperty("choices")[0]
-            .GetProperty("message")
-            .GetProperty("content")
-            .GetString();
-
-        if (string.IsNullOrWhiteSpace(aiOutput))
-        {
-            throw new InvalidOperationException("AI returned an empty response.");
-        }
-
-        var responseId = envelopeDocument.RootElement.TryGetProperty("id", out var idProp)
-            ? idProp.GetString()
-            : null;
-        logger.LogInformation(
-            "OpenAI response id={ResponseId}, assistant_message_length={Length}, assistant_message={AssistantMessage}",
-            responseId,
-            aiOutput.Length,
-            TruncateForLog(aiOutput, MaxAssistantMessageLogChars));
+        var primaryAssistantOutput = await PostChatCompletionAsync(prompt, cancellationToken).ConfigureAwait(false);
 
         var jsonOptions = new JsonSerializerOptions
         {
@@ -131,46 +78,22 @@ Logs:
             AllowTrailingCommas = true
         };
 
-        var (structured, fragmentCount) = TryDeserializeStructuredAnalysis(aiOutput, jsonOptions);
-        if (fragmentCount > 1)
+        var result = await ResolveStructuredClassificationAsync(primaryAssistantOutput, jsonOptions, cancellationToken)
+            .ConfigureAwait(false);
+
+        result.RawAIResponse = primaryAssistantOutput;
+
+        using (ClassificationTelemetry.BeginLoggingScope(logger, result))
         {
+            ClassificationTelemetry.ApplyActivityTags(result);
             logger.LogInformation(
-                "Aggregated OpenAI output from {FragmentCount} JSON fragments into one summary.",
-                fragmentCount);
+                "Classification resolved: parse_mode={ParseMode}, fallback_used={Fallback}, retry_count={Retries}, confidence={Confidence}",
+                result.ClassificationParseMode,
+                result.ClassificationFallbackUsed,
+                result.ClassificationRetryCount,
+                result.Confidence);
         }
 
-        LogAnalysisResult? result = structured;
-        if (result is null)
-        {
-            var fallback = ExtractFirstBalancedJsonObject(aiOutput);
-            if (!string.IsNullOrWhiteSpace(fallback))
-            {
-                try
-                {
-                    result = JsonSerializer.Deserialize<LogAnalysisResult>(fallback, jsonOptions);
-                }
-                catch (JsonException ex)
-                {
-                    logger.LogWarning(
-                        ex,
-                        "Failed to deserialize OpenAI JSON; falling back to text heuristics. Snippet: {Snippet}",
-                        TruncateForLog(fallback, 280));
-                }
-            }
-        }
-
-        result ??= BuildBestEffortResult(aiOutput);
-
-        result.Severity = NormalizeSeverity(result.Severity);
-        result.Category = NormalizeCategory(result.Category);
-        result.Summary = string.IsNullOrWhiteSpace(result.Summary)
-            ? "AI provided an unstructured analysis output."
-            : result.Summary.Trim();
-        result.Suggestion = string.IsNullOrWhiteSpace(result.Suggestion)
-            ? "Review the related service/component and validate error handling around this path."
-            : result.Suggestion.Trim();
-        result.Confidence = Math.Clamp(result.Confidence <= 0 ? 0.25 : result.Confidence, 0.05, 1.0);
-        result.RawAIResponse = aiOutput;
         return result;
     }
 
@@ -355,18 +278,6 @@ Logs:
         return clone;
     }
 
-    private static LogAnalysisResult BuildBestEffortResult(string aiOutput)
-    {
-        return new LogAnalysisResult
-        {
-            Severity = InferSeverity(aiOutput),
-            Category = InferCategory(aiOutput),
-            Summary = aiOutput.Length > 400 ? aiOutput[..400] : aiOutput,
-            Suggestion = "Use this AI output as best-effort guidance and verify with application telemetry.",
-            Confidence = 0.25
-        };
-    }
-
     /// <summary>
     /// Parses a JSON array of results, or multiple top-level objects separated by commas (legacy model output).
     /// Returns merged aggregate plus fragment count for logging.
@@ -437,30 +348,40 @@ Logs:
         if (items.Count == 1)
         {
             var only = items[0];
-            return new LogAnalysisResult
+            var single = new LogAnalysisResult
             {
                 Severity = only.Severity,
                 Category = only.Category,
                 Summary = only.Summary,
                 Suggestion = only.Suggestion,
                 Confidence = only.Confidence,
+                PossibleRootCause = only.PossibleRootCause,
                 RawAIResponse = string.Empty
             };
+            ClassificationNormalizer.NormalizeTaxonomy(single);
+            return single;
         }
 
-        var normalizedItems = items.Select(r => new LogAnalysisResult
+        var normalizedItems = new List<LogAnalysisResult>();
+        foreach (var r in items)
         {
-            Severity = NormalizeSeverity(r.Severity),
-            Category = NormalizeCategory(r.Category),
-            Summary = r.Summary,
-            Suggestion = r.Suggestion,
-            Confidence = r.Confidence,
-            RawAIResponse = r.RawAIResponse
-        }).ToList();
+            var copy = new LogAnalysisResult
+            {
+                Severity = r.Severity,
+                Category = r.Category,
+                Summary = r.Summary,
+                Suggestion = r.Suggestion,
+                Confidence = r.Confidence,
+                PossibleRootCause = r.PossibleRootCause,
+                RawAIResponse = r.RawAIResponse
+            };
+            ClassificationNormalizer.NormalizeTaxonomy(copy);
+            normalizedItems.Add(copy);
+        }
 
         var worst = normalizedItems.OrderByDescending(r => SeverityRank(r.Severity)).First();
         var categories = normalizedItems.Select(r => r.Category).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-        var category = categories.Count == 1 ? categories[0] : "application";
+        var category = categories.Count == 1 ? categories[0] : "unknown";
 
         var summaries = normalizedItems
             .Select(r => r.Summary.Trim())
@@ -490,12 +411,26 @@ Logs:
         var confidenceSum = normalizedItems.Sum(r => r.Confidence <= 0 ? 0.25 : r.Confidence);
         var confidence = confidenceSum / normalizedItems.Count;
 
+        var rootCauses = normalizedItems
+            .Select(r => r.PossibleRootCause.Trim())
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        var mergedRootCause = rootCauses.Count == 0
+            ? string.Empty
+            : string.Join(" | ", rootCauses);
+        if (mergedRootCause.Length > maxJoined)
+        {
+            mergedRootCause = mergedRootCause[..maxJoined] + "...";
+        }
+
         return new LogAnalysisResult
         {
             Severity = worst.Severity,
             Category = category,
             Summary = summary,
             Suggestion = suggestion,
+            PossibleRootCause = mergedRootCause,
             Confidence = confidence,
             RawAIResponse = string.Empty
         };
@@ -615,68 +550,5 @@ Logs:
         }
 
         return string.Empty;
-    }
-
-    private static string NormalizeSeverity(string severity)
-    {
-        if (string.IsNullOrWhiteSpace(severity))
-        {
-            return "medium";
-        }
-
-        var normalized = severity.Trim().ToLowerInvariant();
-        return normalized is "critical" or "high" or "medium" or "low" ? normalized : "medium";
-    }
-
-    private static string NormalizeCategory(string category)
-    {
-        return string.IsNullOrWhiteSpace(category) ? "unknown" : category.Trim().ToLowerInvariant();
-    }
-
-    private static string InferSeverity(string text)
-    {
-        var lowered = text.ToLowerInvariant();
-        if (lowered.Contains("critical", StringComparison.Ordinal))
-        {
-            return "critical";
-        }
-
-        if (lowered.Contains("high", StringComparison.Ordinal) || lowered.Contains("exception", StringComparison.Ordinal))
-        {
-            return "high";
-        }
-
-        if (lowered.Contains("low", StringComparison.Ordinal))
-        {
-            return "low";
-        }
-
-        return "medium";
-    }
-
-    private static string InferCategory(string text)
-    {
-        var lowered = text.ToLowerInvariant();
-        if (lowered.Contains("auth", StringComparison.Ordinal) || lowered.Contains("token", StringComparison.Ordinal))
-        {
-            return "auth";
-        }
-
-        if (lowered.Contains("database", StringComparison.Ordinal) || lowered.Contains("sql", StringComparison.Ordinal))
-        {
-            return "database";
-        }
-
-        if (lowered.Contains("timeout", StringComparison.Ordinal))
-        {
-            return "timeout";
-        }
-
-        if (lowered.Contains("network", StringComparison.Ordinal) || lowered.Contains("http", StringComparison.Ordinal))
-        {
-            return "network";
-        }
-
-        return "application";
     }
 }

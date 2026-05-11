@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Security.Cryptography;
 using System.Text;
 using System.Net.Http.Headers;
 using System.Text.Json;
@@ -15,6 +14,7 @@ public class GraylogLogProvider(
     HttpClient httpClient,
     IOptions<GraylogOptions> options,
     IServiceScopeFactory scopeFactory,
+    ILogFingerprintService fingerprintService,
     ILogger<GraylogLogProvider> logger) : ILogProvider
 {
     private const string CheckpointSource = "graylog";
@@ -88,14 +88,14 @@ public class GraylogLogProvider(
                     continue;
                 }
 
-                var dedupeHash = ComputeHash(timestamp.Value, level, message);
+                var dedupeHash = fingerprintService.ComputeStableHash(FormatLogLine(level, message));
                 if (!seenHashes.Add(dedupeHash))
                 {
                     logger.LogDebug("Graylog duplicate skipped for timestamp {Timestamp}.", timestamp.Value);
                     continue;
                 }
 
-                lines.Add(FormatLogLine(timestamp.Value, level, message));
+                lines.Add(FormatLogLine(level, message));
                 if (!newestTimestamp.HasValue || timestamp.Value > newestTimestamp.Value)
                 {
                     newestTimestamp = timestamp.Value;
@@ -303,10 +303,10 @@ public class GraylogLogProvider(
         return message.Trim();
     }
 
-    private static string FormatLogLine(DateTimeOffset timestamp, string level, string message)
+    private static string FormatLogLine(string level, string message)
     {
         var normalizedLevel = string.IsNullOrWhiteSpace(level) ? "UNKNOWN" : level.Trim();
-        return $"[{timestamp:O}] [{normalizedLevel}] {message.Trim()}";
+        return $"[{normalizedLevel}] {message.Trim()}";
     }
 
     private static string TryGetString(JsonElement messageObject, string propertyName)
@@ -340,12 +340,5 @@ public class GraylogLogProvider(
         }
     }
 
-    private static string ComputeHash(DateTimeOffset timestamp, string level, string message)
-    {
-        var raw = $"{timestamp:O}|{level}|{message}";
-        var bytes = Encoding.UTF8.GetBytes(raw);
-        var hash = SHA256.HashData(bytes);
-        return Convert.ToHexString(hash);
-    }
 }
 

@@ -11,6 +11,8 @@ public class LogAnalysisOrchestrator(
     ILogAnalyzerAI logAnalyzerAi,
     ILogGroupingService groupingService,
     INotificationService notificationService,
+    IIncidentUpsertService incidentUpsertService,
+    IIncidentOutboundEnqueueCoordinator incidentOutboundEnqueueCoordinator,
     ILogger<LogAnalysisOrchestrator> logger) : ILogAnalysisOrchestrator
 {
     private static readonly TimeSpan AiTimeout = TimeSpan.FromSeconds(8);
@@ -48,7 +50,7 @@ public class LogAnalysisOrchestrator(
 
         foreach (var logEntry in logEntries)
         {
-            var logHash = fingerprintService.ComputeHash(logEntry);
+            var logHash = fingerprintService.ComputeStableHash(logEntry);
             var existingRecord = await repository.GetByHashAsync(logHash, cancellationToken);
 
             if (existingRecord is not null)
@@ -56,6 +58,13 @@ public class LogAnalysisOrchestrator(
                 existingRecord.Count += 1;
                 existingRecord.LastSeenUtc = DateTime.UtcNow;
                 repository.Update(existingRecord);
+                var cachedUpsert = await incidentUpsertService.UpsertFromLogAnalysisAsync(
+                    existingRecord,
+                    IncidentSource.ApiAdHoc,
+                    occurrenceIncrement: 1,
+                    classificationCorrelation: null,
+                    cancellationToken).ConfigureAwait(false);
+                incidentOutboundEnqueueCoordinator.TrackIncidentFingerprint(cachedUpsert.IncidentFingerprint);
                 responses.Add(Map(existingRecord, isCached: true));
                 continue;
             }
@@ -76,6 +85,7 @@ public class LogAnalysisOrchestrator(
                 Category = aiResult.Category,
                 Summary = aiResult.Summary,
                 Suggestion = aiResult.Suggestion,
+                PossibleRootCause = aiResult.PossibleRootCause,
                 Confidence = aiResult.Confidence,
                 CreatedUtc = DateTime.UtcNow,
                 LastSeenUtc = DateTime.UtcNow,
@@ -83,6 +93,16 @@ public class LogAnalysisOrchestrator(
             };
 
             await repository.AddAsync(record, cancellationToken);
+            var freshUpsert = await incidentUpsertService.UpsertFromLogAnalysisAsync(
+                    record,
+                    IncidentSource.ApiAdHoc,
+                    occurrenceIncrement: 1,
+                    classificationCorrelation: new ClassificationCorrelationSnapshot(
+                        aiResult.ClassificationParseMode,
+                        aiResult.ClassificationFallbackUsed),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            incidentOutboundEnqueueCoordinator.TrackIncidentFingerprint(freshUpsert.IncidentFingerprint);
             responses.Add(Map(record, isCached: false, isLowConfidence: analysis.IsLowConfidence, rawAiResponse: includeRawAIResponse ? aiResult.RawAIResponse : null));
 
             if (string.Equals(record.Severity, "critical", StringComparison.OrdinalIgnoreCase))
@@ -92,6 +112,7 @@ public class LogAnalysisOrchestrator(
         }
 
         await repository.SaveChangesAsync(cancellationToken);
+        await incidentOutboundEnqueueCoordinator.FlushAfterPersistenceAsync(cancellationToken).ConfigureAwait(false);
         return AggregateResponses(responses, allCached);
     }
 
@@ -103,6 +124,7 @@ public class LogAnalysisOrchestrator(
             Category = record.Category,
             Summary = record.Summary,
             Suggestion = record.Suggestion,
+            PossibleRootCause = record.PossibleRootCause,
             Confidence = record.Confidence,
             GroupId = record.GroupId,
             IsCached = isCached,
@@ -115,20 +137,20 @@ public class LogAnalysisOrchestrator(
     {
         var lowered = log.ToLowerInvariant();
         var severity = "low";
-        var category = "application";
+        var category = "backend";
         var suggestion = "Review the log details and retry the AI analysis when the model is available.";
 
         if (exception is TimeoutException || lowered.Contains("timeout", StringComparison.Ordinal))
         {
             severity = "medium";
-            category = "timeout";
+            category = "infrastructure";
             suggestion = "Investigate latency, retry policies, and external dependencies involved in the timeout.";
         }
 
         if (lowered.Contains("nullreference", StringComparison.Ordinal) || lowered.Contains("null reference", StringComparison.Ordinal))
         {
             severity = "high";
-            category = "application";
+            category = "backend";
             suggestion = "Inspect null guards and object initialization paths around the failing code path.";
         }
 
@@ -142,8 +164,15 @@ public class LogAnalysisOrchestrator(
             Severity = severity,
             Category = category,
             Summary = "AI analysis failed, so a rule-based fallback classified the log.",
+            PossibleRootCause = exception.Message.Length > 0
+                ? $"Heuristic fallback after AI failure: {exception.GetType().Name}"
+                : "Heuristic fallback after AI failure.",
             Suggestion = suggestion,
-            Confidence = 0.35
+            Confidence = 0.35,
+            ClassificationSchemaVersion = "1",
+            ClassificationParseMode = "minimal_safe_fallback",
+            ClassificationFallbackUsed = "minimal_safe_fallback",
+            ClassificationRetryCount = 0
         };
     }
 
@@ -223,6 +252,9 @@ public class LogAnalysisOrchestrator(
             Category = primary.Category,
             Summary = string.Join(" | ", responses.Select(x => x.Summary).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct()),
             Suggestion = primary.Suggestion,
+            PossibleRootCause = string.Join(
+                " | ",
+                responses.Select(x => x.PossibleRootCause).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct()),
             Confidence = responses.Average(x => x.Confidence),
             GroupId = primary.GroupId,
             IsCached = allCached,

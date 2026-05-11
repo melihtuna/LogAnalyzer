@@ -1,8 +1,11 @@
 <Solution>
+  <Project Path="LogAnalyzer.AppHost/LogAnalyzer.AppHost.csproj" />
+  <Project Path="LogAnalyzer.ServiceDefaults/LogAnalyzer.ServiceDefaults.csproj" />
   <Project Path="LogAnalyzer/LogAnalyzer.Api.csproj" />
   <Project Path="LogAnalyzer.Domain/LogAnalyzer.Domain.csproj" />
   <Project Path="LogAnalyzer.Infrastructure/LogAnalyzer.Infrastructure.csproj" />
   <Project Path="LogAnalyzer.AI/LogAnalyzer.AI.csproj" />
   <Project Path="LogAnalyzer.Processor/LogAnalyzer.Processor.csproj" />
+  <Project Path="LogAnalyzer.Infrastructure.Tests/LogAnalyzer.Infrastructure.Tests.csproj" />
   <Project Path="mock-log-producer/MockLogProducer.csproj" />
 </Solution>

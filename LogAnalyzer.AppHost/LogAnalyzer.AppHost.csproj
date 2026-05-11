@@ -1,0 +1,15 @@
+<Project Sdk="Aspire.AppHost.Sdk/13.3.0">
+
+  <ItemGroup>
+    <ProjectReference Include="..\LogAnalyzer\LogAnalyzer.Api.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <UserSecretsId>d1df7644-b3a5-4461-8072-4ee73e158d4e</UserSecretsId>
+  </PropertyGroup>
+
+</Project>

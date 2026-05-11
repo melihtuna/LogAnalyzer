@@ -10,6 +10,8 @@ public class LogAnalysisResponse
 
     public string Suggestion { get; set; } = string.Empty;
 
+    public string PossibleRootCause { get; set; } = string.Empty;
+
     public double Confidence { get; set; }
 
     public string GroupId { get; set; } = string.Empty;

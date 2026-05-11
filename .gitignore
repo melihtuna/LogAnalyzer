@@ -362,7 +362,8 @@ MigrationBackup/
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
 
-# Local environment files
+# Local environment files (optional)
 .env
 .env.*
 !.env.example
+/LogAnalyzer/appsettings.Development.json

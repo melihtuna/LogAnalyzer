@@ -1,219 +1,184 @@
 # LogAnalyzer
 
-**LogAnalyzer** is a .NET 8 backend that combines **central log retrieval**, **structured persistence**, and **OpenAI-assisted analysis**. It supports an on-demand HTTP API for ad-hoc log payloads and a **scheduled pipeline** that pulls from **Graylog**, calls **OpenAI Chat Completions** once per batch (with caching), and stores aggregate runs for review.
+.NET 8 API: Graylog → OpenAI classification → PostgreSQL incidents → optional Jira outbound. On-demand `POST /api/log/analyze` uses a bounded queue.
 
 ---
 
-## Overview
+## Architecture Overview
 
-| Path | Role |
-|------|------|
-| **API** | Clients submit raw log text; the service fingerprints lines, uses cache when possible, and enqueues analysis through a bounded channel. |
-| **Periodic job** | A hosted service fetches logs from Graylog, deduplicates by line hash, batches uncached lines, calls OpenAI for a **single consolidated summary**, and writes results to PostgreSQL. |
-| **Persistence** | `LogAnalyses` cache (unique `LogHash`), `LogAnalysisRuns` snapshots, optional Graylog checkpoint metadata. |
+| Component | Role |
+|-----------|------|
+| **LogAnalyzer.Api** | HTTP host, EF migrations, controllers. |
+| **LogAnalyzer.Processor** | Queue worker + `PeriodicLogAnalysisBackgroundService` (Graylog batch → OpenAI when needed). |
+| **LogAnalyzer.Infrastructure** | Npgsql, Graylog client, incidents, outbound channel + Jira REST. |
+| **LogAnalyzer.AI** | OpenAI Chat Completions client. |
+| **LogAnalyzer.ServiceDefaults** | OTEL (`LogAnalyzer.Outbound` meter), `/health`, `/alive`. |
+| **LogAnalyzer.AppHost** | Runs **LogAnalyzer.Api** locally + Aspire Dashboard. |
+| **Docker Compose** | **Postgres**, **pgAdmin**, **mock-log-producer** (GELF → Graylog). **No API container.** |
 
-The AI layer is tuned for **operator summaries**: one JSON result describing themes, severity, and **actionable remediation** (including file/line hints when stack traces are present). Legacy multi-object model output is merged server-side when needed.
-
----
-
-## Solution layout
-
-| Project | Responsibility |
-|---------|----------------|
-| `LogAnalyzer.Api` | ASP.NET Core host, DI, Swagger, controllers. |
-| `LogAnalyzer.Domain` | Models, `ILogProvider`, repositories, orchestration contracts. |
-| `LogAnalyzer.Processor` | Queue consumer, `LogAnalysisOrchestrator`, `PeriodicLogAnalysisBackgroundService`. |
-| `LogAnalyzer.Infrastructure` | EF Core (PostgreSQL), Graylog HTTP provider, repositories, parsers, grouping. |
-| `LogAnalyzer.AI` | `OpenAiLogAnalyzer` — Chat Completions, rate-limit handling, response parsing. |
-| `mock-log-producer` | Optional console app emitting realistic, stack-trace–style logs to Graylog via GELF. |
+**Periodic pipeline:** dedupe → batch uncached lines → one OpenAI call per batch → persist → incident upsert → outbound enqueue when enabled. First cycle **after** `PeriodicAnalysis:IntervalMinutes` (no run at process start).
 
 ---
 
-## Features
+## Local model (default)
 
-- **OpenAI Chat Completions** (configurable model; default suitable for cost-sensitive workloads).
-- **Per-line fingerprint cache** for API-driven analysis; **batch-hash cache** for periodic Graylog cycles (one row per OpenAI batch, not per duplicated summary).
-- **Bounded async queue** for `/api/log/analyze` with back-pressure (`429` when full).
-- **Graylog** integration: query window, pagination, authentication options aligned with your deployment.
-- **PostgreSQL** via EF Core (`EnsureCreated` on startup in current template — consider migrations for production).
-- **Run history API**: latest periodic/OpenAI snapshots via `GET /log-analysis`.
-- **Operational logging**: outbound prompt body (length-capped), assistant reply snippets, structured handling of `429` / quota-related errors.
+| Layer | What runs |
+|-------|-----------|
+| **Compose** | Database + pgAdmin + producer sending synthetic logs toward Graylog via **GELF**. |
+| **AppHost / VS** | API process + Aspire Dashboard + tracing defaults. |
 
----
-
-## Tech stack
-
-- .NET 8, ASP.NET Core Web API  
-- Entity Framework Core + **Npgsql**  
-- **OpenAI** HTTP API (`chat/completions`)  
-- **Graylog** (REST search + optional GELF from mock producer)  
-- Docker Compose (Postgres, PgAdmin, API image, mock producer)
+Do **not** expect the API inside Compose for day-to-day dev. Optional production-style image build still uses repo **`Dockerfile`** (manual `docker build`), not `docker compose`.
 
 ---
 
-## Prerequisites
+## Configuration split
 
-- [.NET SDK 8](https://dotnet.microsoft.com/download/dotnet/8.0)+  
-- **PostgreSQL** (local or container)  
-- **OpenAI API key** with billing/quota appropriate for your tier  
-- **Graylog** reachable from the API (host networking differs for Docker vs localhost — see `.env.example`)
+**Graylog uses two different surfaces:**
 
----
+| Surface | Purpose | Where |
+|---------|---------|--------|
+| **GELF UDP** | Docker **logging driver** for `mock-log-producer` only — where log lines are **sent into** Graylog. | **`.env`** → **`GRAYLOG_GELF_ADDRESS`** (Compose substitution). **Not** read by ASP.NET `GraylogOptions`. |
+| **REST API** | API periodic job **searches** Graylog (`GraylogLogProvider`). | **`Graylog`** in **`appsettings*.json`** / user-secrets (`BaseUrl`, `ApiToken`, `Query`, timeouts, pagination, …). |
 
-## Configuration
+**Jira:** `Jira` section in **`appsettings.json`** (defaults) and **`appsettings.Development.json`** (local overrides) or **`dotnet user-secrets`** for tokens — never in **`.env`** for this repo’s Compose layout.
 
-Secrets should live in **environment variables** or **`.env`** (Compose); avoid committing real keys.
+### 1) Docker / Compose — containers only
 
-### Core keys
+| Concern | Files |
+|---------|--------|
+| **Postgres** | `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` in **`.env.example`** → **`.env`**, substituted into **`docker-compose.yml`**. |
+| **pgAdmin** | `PGADMIN_DEFAULT_EMAIL`, `PGADMIN_DEFAULT_PASSWORD` |
+| **mock-log-producer → Graylog** | **`GRAYLOG_GELF_ADDRESS`** (GELF UDP endpoint Docker-side). Producer binary itself has no extra env in this stack. |
 
-| Key | Purpose |
-|-----|---------|
-| `ConnectionStrings:DefaultConnection` | PostgreSQL connection string |
-| `OpenAI:ApiKey` | Bearer token for OpenAI |
-| `OpenAI:Model` | Chat model id (e.g. `gpt-4o-mini`) |
-| `OpenAI:MaxLogCharacters` | Max characters of log payload embedded in the user prompt |
-| `OpenAI:MaxPromptLogCharacters` | Max characters of the **logged** prompt copy (Docker/stdout); does not truncate the HTTP body unless you align truncation separately via `MaxLogCharacters` |
-| `Graylog:BaseUrl` | Graylog root URL |
-| `Graylog:ApiToken` | API token or credential expected by your Graylog setup |
-| `PeriodicAnalysis:IntervalMinutes` | Periodic Graylog/OpenAI cycle interval |
-| `PeriodicAnalysis:MaxDistinctLines` | Cap distinct lines per cycle |
-| `PeriodicAnalysis:MaxLinesSentToOpenAi` | Max uncached lines sent in one OpenAI batch |
+No `OpenAI__`, `Graylog__`, `Jira__`, `PeriodicAnalysis__`, `ConnectionStrings__` (and no ASP.NET double-underscore vars) in **`.env`**.
 
-Copy `.env.example` → `.env` and adjust. Compose wires DB URL explicitly for `log-analyzer`; OpenAI and Graylog typically come from `env_file: .env`.
+**DB pairing:** `POSTGRES_*` must match **`ConnectionStrings:DefaultConnection`** (database name, user, password on `localhost`) in **`appsettings.json`**.
 
----
+### 2) Application — API + shared processors
 
-## Run locally
+| Concern | Files |
+|---------|--------|
+| **ConnectionStrings**, **OpenAI**, **Graylog** (REST), **PeriodicAnalysis**, **IncidentReuse**, **IncidentAiSnapshot**, **Webhook**, **Jira**, host **Logging** / **AllowedHosts** | **`LogAnalyzer/appsettings.json`** |
+| Local/dev overrides | **`LogAnalyzer/appsettings.Development.json`** (merged over **`appsettings.json`**). For shared repos prefer **`dotnet user-secrets`** instead of committing secrets here. |
+| Secrets (`OpenAI:ApiKey`, `Graylog:ApiToken`, Jira tokens, …) | **`dotnet user-secrets`** on **`LogAnalyzer.Api`** |
 
-1. Start PostgreSQL and ensure `ConnectionStrings:DefaultConnection` matches.  
-2. Set `OpenAI:ApiKey`, `Graylog:BaseUrl`, `Graylog:ApiToken` (user secrets, env, or `appsettings.Development.json` — never commit secrets).  
-3. From the repository root:
+### 3) Aspire host only
+
+| Concern | Files |
+|---------|--------|
+| AppHost / DCP log noise | **`LogAnalyzer.AppHost/appsettings.json`** (and **`.Development.json`** if present). Does **not** replace **`LogAnalyzer/appsettings*.json`** for the API. |
+
+**`LogAnalyzer/configuration.template.json`** — same JSON as **`appsettings.json`** (secrets empty); reference / diff only — **never loaded** by the runtime.
 
 ```bash
-dotnet run --project LogAnalyzer/LogAnalyzer.Api.csproj
+dotnet user-secrets set "OpenAI:ApiKey" "<key>" --project LogAnalyzer/LogAnalyzer.Api.csproj
+dotnet user-secrets set "Graylog:ApiToken" "<token>" --project LogAnalyzer/LogAnalyzer.Api.csproj
 ```
-
-Swagger (Development):
-
-- HTTPS profile: `https://localhost:7225/swagger`  
-- HTTP: `http://localhost:5294/swagger`
 
 ---
 
-## Run with Docker Compose
+## End-to-end observation flow
 
-Graylog itself is **not** defined in the bundled Compose file (often installed separately). The stack brings up **PostgreSQL**, **PgAdmin**, the **API**, and the **mock log producer** (GELF target configurable).
+1. **`docker compose up -d`** — Postgres, pgAdmin, mock-log-producer.
+2. **Graylog** running with a **GELF UDP input** matching producer endpoint (default `udp://host.docker.internal:12201` from inside mock container).
+3. **Visual Studio or** `dotnet run --project LogAnalyzer.AppHost/LogAnalyzer.AppHost.csproj` — API starts; console shows **Aspire Dashboard** URL.
+4. **mock-log-producer** emits structured lines → Graylog indexes them.
+5. **`PeriodicLogAnalysisBackgroundService`** (after first interval) pulls Graylog → OpenAI → **`LogAnalyses` / incidents** (ensure `Graylog:*` + `OpenAI:*` configured).
+6. **Jira outbound** — if `Jira:EnableIntegration` is **true**, dispatcher processes queue → mock issue key (**`UseMockClient: true`**) or REST create (**`UseMockClient: false`** + valid auth). Watch logs, `/health`, OTEL meter **`LogAnalyzer.Outbound`**.
+
+Shortcut without Graylog delay: **`POST /api/log/analyze`** with a JSON body (still exercises OpenAI path).
+
+---
+
+## Startup order
+
+1. Graylog (external) + GELF input.
+2. `docker compose up -d`
+3. AppHost or `dotnet run` API — EF migrations apply on startup.
+
+Ports (typical): Postgres **5432**, pgAdmin **5050**, API **7225/5294** (VS profiles), Swagger under Development.
+
+---
+
+## OpenAI & Jira
+
+- **OpenAI:** `OpenAI:Model`, caps in **`appsettings.json`**; **`OpenAI:ApiKey`** via user-secrets (never commit real keys in JSON).
+- **Jira:** **`Jira`** section in appsettings. **`EnableIntegration: false`** → queue/dispatcher idle. **`UseMockClient: true`** → no HTTP; deterministic fake keys. **`UseMockClient: false`** + **`EnableIntegration: true`** → REST; startup validates BaseUrl, ProjectKey, Basic or Bearer auth fields.
+
+---
+
+## Aspire Dashboard
+
+When AppHost starts, the **dashboard URL is printed to the console** (Aspire assigns the port). Use it for resource status, structured logs, and traces emitted via **`AddServiceDefaults`**.
+
+---
+
+## Smoke tests
 
 ```bash
-cp .env.example .env
-# Edit .env with OpenAI key and Graylog base URL / token and GELF address
-docker compose up --build
+dotnet build LogAnalyzer.slnx -c Release
+dotnet test LogAnalyzer.Infrastructure.Tests/LogAnalyzer.Infrastructure.Tests.csproj -c Release --no-build
 ```
 
-- API: `http://localhost:8080`  
-- Swagger in Development builds only (adjust `ASPNETCORE_ENVIRONMENT` if you need UI in containers).
-
-Ensure `GRAYLOG_GELF_ADDRESS` matches your Graylog GELF UDP input when using `mock-log-producer`.
+**HTTP:** `GET /alive`, `GET /health`, `POST /api/log/analyze`, `GET /log-analysis`.
 
 ---
 
-## HTTP API
+## Observability & health
 
-### Analyze logs (on-demand)
-
-`POST /api/log/analyze`
-
-```json
-{
-  "logs": "ERROR NullReferenceException at Example()\nWARN Dependency timeout",
-  "includeRawAIResponse": false
-}
-```
-
-Multi-line bodies must use escaped `\n` inside JSON strings. Queue exhaustion returns **429 Too Many Requests**.
-
-### Latest analysis runs
-
-`GET /log-analysis`
-
-Returns persisted snapshots (`LogAnalysisRuns`) from the periodic pipeline / stored analyses.
+- OpenTelemetry metrics/tracing via ServiceDefaults; **`LogAnalyzer.Outbound`** for queue/dispatch/Jira HTTP.
+- **`GET /health`** includes outbound readiness (`ready` tag) when Jira integration is registered.
 
 ---
 
-## Security notes
+## Troubleshooting
 
-- Rotate any API keys that were ever committed to git.  
-- Prefer **environment-specific** configuration over checked-in `appsettings.json` secrets.  
-- Logged prompts may contain **PII or secrets** if present in source logs — tune `OpenAI:MaxPromptLogCharacters` or log levels accordingly.
+| Symptom | Check |
+|---------|--------|
+| Startup validation fails | `OpenAI:ApiKey`, `Graylog:BaseUrl`, `Graylog:ApiToken` (**user-secrets** or temporary edits to **`appsettings.Development.json`** — avoid committing secrets). |
+| Periodic never hits OpenAI | Graylog empty/query window; unchanged aggregate log hash; all lines cached; interval not elapsed. |
+| No logs in Graylog from producer | GELF input port/host vs `GRAYLOG_GELF_ADDRESS`; firewall. |
+| `429` on analyze | Analysis queue full (1000). |
+
+---
+
+## Security
+
+Do not commit secrets. Prefer **user-secrets**. If an old **`.env`** ever contained API keys, **rotate them** — `.env` must stay Compose-only (see **`.env.example`**).
 
 ---
 
 ## License
 
-This project is intended for learning and development. Align `LICENSE` with your organization’s policy.
+Placeholder — align with your organization.
 
 ---
 
-## Changelog
+## Changelog (series)
 
-### 2026-05-01
+### Phase 4c — Config boundary cleanup (2026-05-10)
 
-**Persistence & data model**
+- **`.env` / `.env.example`**: strictly Compose (Postgres, pgAdmin, **`GRAYLOG_GELF_ADDRESS`**). Removed ASP.NET-style variables from `.env`.
+- **`appsettings.Development.json`**: local/demo overrides (OpenAI, Graylog REST, periodic tuning); production forks should use **user-secrets** and keep this file non-secret or gitignored.
+- **`configuration.template.json`** kept in lockstep with **`appsettings.json`** (application surface only).
 
-- Replaced SQLite-oriented hosting with **PostgreSQL** via **EF Core + Npgsql** (`ConnectionStrings:DefaultConnection`).
-- Expanded schema beyond ad-hoc cache: **`LogAnalyses`** (`LogAnalysisRecord`, unique **`LogHash`** index), **`LogAnalysisRuns`** (serialized periodic/API-style snapshots), and **`LogSourceCheckpoints`** (incremental Graylog cursor per source).
-- Application startup uses **`Database.EnsureCreated()`** in the current template (documented trade-off vs migrations for production).
+### Phase 4b — Local orchestration simplification (2026-05-10)
 
-**Log ingestion (Graylog)**
+- **Docker Compose:** Postgres + pgAdmin + mock-log-producer only; **removed API (`log-analyzer`) service** from compose.
+- **README:** Compose infra + AppHost API model.
 
-- Introduced **`ILogProvider`** with **`GraylogLogProvider`**: REST relative search, pagination, bounded result size, timeouts, and HTTP retries aligned with `GraylogOptions`.
-- Wired **HTTP Basic** credentials for Graylog API calls where required; resilient extraction of human-readable message text (including `message` field fallbacks typical of Graylog payloads).
-- Optional **checkpoint** persistence so incremental reads do not blindly advance on empty cycles.
+### Phase 4 — Docs & configuration (2026-05-10)
 
-**AI layer (OpenAI, not Ollama)**
+- Runbook in README; **`UserSecretsId`** on **`LogAnalyzer.Api`**; periodic analysis waits first timer tick before first Graylog cycle.
 
-- **`OpenAiLogAnalyzer`** implements **`ILogAnalyzerAI`** using **`HttpClient`** against **`/v1/chat/completions`** (no Semantic Kernel).
-- **`OpenAI:Model`** is configurable; outbound log payload size capped via **`OpenAI:MaxLogCharacters`** before embedding in the user prompt.
-- **Rate limits & billing**: differentiated **`429`** handling—`Retry-After` when present, exponential backoff otherwise, early termination on **`insufficient_quota`** / **`billing_hard_limit_reached`**, and explicit log guidance toward organization billing/limits URLs.
-- **Response parsing**: robust extraction of the first balanced JSON object; support for **JSON arrays** or **multiple comma-separated objects** by merging into a single `LogAnalysisResult`; `JsonException` falls back to heuristic classification.
-- **Prompt contract** shifted to a **single consolidated assessment** across batched logs (operator summary), with instructions to surface **stack-derived file:line hints** and **concrete remediation** tied to code locations.
+### Phase 3 — Operational hardening & mock traffic (2026-05)
 
-**Processor & orchestration**
+- Outbound metrics, Jira health/readiness, dispatcher hardening; mock producer **`eval_*`** harness labels (not classification ground truth).
 
-- Added **`PeriodicLogAnalysisBackgroundService`**: pulls logs from Graylog on a configurable interval, **deduplicates lines by fingerprint**, splits **cached vs uncached**, caps lines sent to OpenAI, and persists **`LogAnalysisRuns`**.
-- **Startup behavior**: first analysis cycle runs **immediately** after host start, then waits `PeriodicAnalysis:IntervalMinutes` (no “silent first interval” gap).
-- **Scoped dependencies in singleton hosted services**: periodic path uses **`IServiceScopeFactory`** so repositories and EF contexts resolve correctly per operation.
-- **Cache semantics split by path**:
-  - **API** (`LogAnalysisOrchestrator`): still **per log line hash** for on-demand `POST /api/log/analyze`.
-  - **Periodic**: **one `LogAnalyses` row per OpenAI batch** using a **stable sorted multi-line payload hash** (avoids N duplicate rows sharing identical AI fields); cache hit increments `Count` / `LastSeenUtc` on that batch row.
+### Phase 2 — PostgreSQL, Graylog, OpenAI batch periodic (2026-05-01)
 
-**API & configuration surface**
+- EF schema, **`GraylogLogProvider`**, **`OpenAiLogAnalyzer`**, **`PeriodicLogAnalysisBackgroundService`**, **`GET /log-analysis`**.
 
-- **`Program` validation** for required **`OpenAI:ApiKey`**, **`Graylog:BaseUrl`**, **`Graylog:ApiToken`** at startup.
-- **`GET /log-analysis`** endpoint (`LogAnalysisController`) exposing latest persisted runs from **`LogAnalysisRuns`**.
-- **Environment-first configuration**: `.env` / Compose-friendly keys (`OpenAI__*`, `Graylog__*`, `PeriodicAnalysis__*`, `GRAYLOG_GELF_ADDRESS`) documented in **`.env.example`**.
+### Phase 1 — Layering & API queue (2026-04-28)
 
-**Observability**
-
-- Structured **Information** logs for OpenAI **request dimensions**, **full prompt body** (length-capped via **`OpenAI:MaxPromptLogCharacters`** for Docker/stdout safety), and **assistant output** snippets (with response `id` when returned).
-
-**Developer experience & fixtures**
-
-- **`docker-compose.yml`**: PostgreSQL, PgAdmin, **`log-analyzer`** image build, and **`mock-log-producer`** with configurable **GELF** sink (Graylog itself remains an external dependency in the default compose).
-- **`mock-log-producer`** rewritten to emit **production-shaped** log lines: ISO timestamps, service names, `trace_id` / `span_id`, HTTP paths, and **multi-line stack traces** with **`at … in /src/.../File.cs:line N`** style frames for realistic AI evaluation.
-
-**Documentation**
-
-- README rewritten for the **OpenAI + PostgreSQL + Graylog + Docker** architecture; this changelog entry captures the substantive runtime and schema deltas that the short May 1 list previously summarized.
-
-### 2026-04-28
-
-- Refactored to layered architecture: `LogAnalyzer.Api`, `LogAnalyzer.Domain`, `LogAnalyzer.Processor`, `LogAnalyzer.Infrastructure`, `LogAnalyzer.AI`.
-- Standardized AI output contract with strict JSON schema and validation.
-- Switched to per-log-entry caching and aggregate response generation.
-- Added bounded background queue (`capacity: 1000`) with backpressure and `429` handling.
-- Added AI timeout (`3s`), single retry, and safe fallback when AI fails or confidence is low.
-- Improved grouping normalization by removing timestamps, GUIDs, numeric IDs, and extra whitespace.
-- Made critical webhook notifications non-blocking and failure-tolerant.
-- Extended persistence model with `Count` and `LastSeenUtc` for repeated log tracking.
-- Fixed hosted service lifetime issue by resolving scoped orchestrator inside a created scope.
+- Solution split, bounded queue + **`429`**, AI retry/fallback, grouping.

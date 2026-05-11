@@ -33,6 +33,18 @@ public class PeriodicLogAnalysisBackgroundService(
         {
             try
             {
+                if (!await timer.WaitForNextTickAsync(stoppingToken))
+                {
+                    break;
+                }
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
+
+            try
+            {
                 await RunAnalysisCycleAsync(
                     maxDistinct,
                     maxForOpenAi,
@@ -45,18 +57,6 @@ public class PeriodicLogAnalysisBackgroundService(
             catch (Exception ex)
             {
                 logger.LogError(ex, "Periodic log analysis failed.");
-            }
-
-            try
-            {
-                if (!await timer.WaitForNextTickAsync(stoppingToken))
-                {
-                    break;
-                }
-            }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-            {
-                break;
             }
         }
     }
@@ -95,10 +95,13 @@ public class PeriodicLogAnalysisBackgroundService(
 
             var cachedRecords = new List<LogAnalysisRecord>();
             var uncachedLines = new List<string>();
+            LogAnalysisRecord? batchRecordForIncident = null;
+            var batchOccurrenceIncrement = 0;
+            ClassificationCorrelationSnapshot? batchCorrelationForIncident = null;
 
             foreach (var line in distinctLines)
             {
-                var hash = fingerprintService.ComputeHash(line);
+                var hash = fingerprintService.ComputeStableHash(line);
                 var existing = await repository.GetByHashAsync(hash, stoppingToken);
                 if (existing is not null)
                 {
@@ -133,7 +136,7 @@ public class PeriodicLogAnalysisBackgroundService(
                 // Stable ordering so batch fingerprint matches across cycles for the same line multiset.
                 var batchLines = limitedUncached.OrderBy(x => x, StringComparer.Ordinal).ToList();
                 var payload = string.Join(Environment.NewLine, batchLines);
-                var batchHash = fingerprintService.ComputeHash(payload);
+                var batchHash = fingerprintService.ComputeStableHash(payload);
 
                 var batchExisting = await repository.GetByHashAsync(batchHash, stoppingToken);
                 LogAnalysisResult aiResult;
@@ -143,6 +146,9 @@ public class PeriodicLogAnalysisBackgroundService(
                     batchExisting.Count += batchLines.Count;
                     batchExisting.LastSeenUtc = DateTime.UtcNow;
                     repository.Update(batchExisting);
+                    batchRecordForIncident = batchExisting;
+                    batchOccurrenceIncrement = batchLines.Count;
+                    batchCorrelationForIncident = null;
                     aiResult = RecordToAnalysisResult(batchExisting);
                     logger.LogInformation(
                         "Periodic analysis reused batch cache row for {LineCount} lines (single LogAnalyses row per OpenAI batch).",
@@ -153,7 +159,7 @@ public class PeriodicLogAnalysisBackgroundService(
                     aiResult = await logAnalyzerAi.AnalyzeAsync(payload, stoppingToken);
                     var processedPayload = logParser.ExtractErrorLinesOrFullLogs(payload);
                     var groupId = groupingService.CreateGroupId(processedPayload);
-                    await repository.AddAsync(new LogAnalysisRecord
+                    var newBatchRecord = new LogAnalysisRecord
                     {
                         LogHash = batchHash,
                         GroupId = groupId,
@@ -163,11 +169,18 @@ public class PeriodicLogAnalysisBackgroundService(
                         Category = aiResult.Category,
                         Summary = aiResult.Summary,
                         Suggestion = aiResult.Suggestion,
+                        PossibleRootCause = aiResult.PossibleRootCause,
                         Confidence = aiResult.Confidence,
                         CreatedUtc = DateTime.UtcNow,
                         LastSeenUtc = DateTime.UtcNow,
                         Count = batchLines.Count
-                    }, stoppingToken);
+                    };
+                    await repository.AddAsync(newBatchRecord, stoppingToken);
+                    batchRecordForIncident = newBatchRecord;
+                    batchOccurrenceIncrement = batchLines.Count;
+                    batchCorrelationForIncident = new ClassificationCorrelationSnapshot(
+                        aiResult.ClassificationParseMode,
+                        aiResult.ClassificationFallbackUsed);
                     logger.LogInformation(
                         "Periodic analysis stored one batch cache row for {LineCount} uncached lines.",
                         batchLines.Count);
@@ -178,7 +191,33 @@ public class PeriodicLogAnalysisBackgroundService(
                     : aiResult;
             }
 
+            var incidentUpsert = scope.ServiceProvider.GetRequiredService<IIncidentUpsertService>();
+            var outboundCoordinator = scope.ServiceProvider.GetRequiredService<IIncidentOutboundEnqueueCoordinator>();
+
+            foreach (var cached in cachedRecords)
+            {
+                var cachedUpsert = await incidentUpsert.UpsertFromLogAnalysisAsync(
+                    cached,
+                    IncidentSource.PeriodicGraylog,
+                    occurrenceIncrement: 1,
+                    classificationCorrelation: null,
+                    stoppingToken).ConfigureAwait(false);
+                outboundCoordinator.TrackIncidentFingerprint(cachedUpsert.IncidentFingerprint);
+            }
+
+            if (batchRecordForIncident is not null)
+            {
+                var batchUpsert = await incidentUpsert.UpsertFromLogAnalysisAsync(
+                    batchRecordForIncident,
+                    IncidentSource.PeriodicGraylog,
+                    occurrenceIncrement: batchOccurrenceIncrement,
+                    classificationCorrelation: batchCorrelationForIncident,
+                    stoppingToken).ConfigureAwait(false);
+                outboundCoordinator.TrackIncidentFingerprint(batchUpsert.IncidentFingerprint);
+            }
+
             await repository.SaveChangesAsync(stoppingToken);
+            await outboundCoordinator.FlushAfterPersistenceAsync(stoppingToken).ConfigureAwait(false);
 
             var logAnalysisRunRepository = scope.ServiceProvider.GetRequiredService<ILogAnalysisRunRepository>();
             var serializedAnalysis = JsonSerializer.Serialize(analysis);
@@ -215,7 +254,7 @@ public class PeriodicLogAnalysisBackgroundService(
         var result = new List<string>();
         foreach (var line in lines)
         {
-            var hash = fingerprintService.ComputeHash(line);
+            var hash = fingerprintService.ComputeStableHash(line);
             if (!seen.Add(hash))
             {
                 continue;
@@ -248,6 +287,7 @@ public class PeriodicLogAnalysisBackgroundService(
             Category = record.Category,
             Summary = record.Summary,
             Suggestion = record.Suggestion,
+            PossibleRootCause = record.PossibleRootCause,
             Confidence = record.Confidence,
             RawAIResponse = string.Empty
         };
@@ -281,6 +321,9 @@ public class PeriodicLogAnalysisBackgroundService(
                 " | ",
                 records.Select(r => r.Summary).Where(s => !string.IsNullOrWhiteSpace(s)).Distinct()),
             Suggestion = primary.Suggestion,
+            PossibleRootCause = string.Join(
+                " | ",
+                records.Select(r => r.PossibleRootCause).Where(s => !string.IsNullOrWhiteSpace(s)).Distinct()),
             Confidence = records.Average(r => r.Confidence),
             RawAIResponse = string.Empty
         };
@@ -306,6 +349,12 @@ public class PeriodicLogAnalysisBackgroundService(
                     .Where(s => !string.IsNullOrWhiteSpace(s))
                     .Distinct()),
             Suggestion = ai.Suggestion,
+            PossibleRootCause = string.Join(
+                " | ",
+                new[] { ai.PossibleRootCause }
+                    .Concat(cached.Select(c => c.PossibleRootCause))
+                    .Where(s => !string.IsNullOrWhiteSpace(s))
+                    .Distinct()),
             Confidence = (ai.Confidence + cached.Average(c => c.Confidence)) / 2.0,
             RawAIResponse = ai.RawAIResponse
         };

@@ -20,6 +20,8 @@ public class LogAnalysisRecord
 
     public string Suggestion { get; set; } = string.Empty;
 
+    public string PossibleRootCause { get; set; } = string.Empty;
+
     public double Confidence { get; set; }
 
     public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;

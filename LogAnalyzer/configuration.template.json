@@ -1,0 +1,62 @@
+{
+  "ConnectionStrings": {
+    "DefaultConnection": "Host=localhost;Port=5432;Database=loganalyzer;Username=loganalyzer;Password=loganalyzer"
+  },
+  "OpenAI": {
+    "ApiKey": "",
+    "Model": "gpt-4o-mini",
+    "MaxLogCharacters": 8000,
+    "MaxPromptLogCharacters": 65536
+  },
+  "Graylog": {
+    "BaseUrl": "http://localhost:9000",
+    "ApiToken": "",
+    "Query": "*",
+    "TimeRangeMinutes": 5,
+    "PageSize": 250,
+    "MaxLogsPerCycle": 2000,
+    "RequestTimeoutSeconds": 20,
+    "MaxRetries": 3,
+    "RetryDelayMilliseconds": 500
+  },
+  "PeriodicAnalysis": {
+    "IntervalMinutes": 5,
+    "MaxDistinctLines": 60,
+    "MaxLinesSentToOpenAi": 12
+  },
+  "IncidentReuse": {
+    "ReuseWindowMinutes": 1440
+  },
+  "IncidentAiSnapshot": {
+    "PromptVersion": "1",
+    "PipelineVersion": "1",
+    "AiModel": null
+  },
+  "Webhook": {
+    "Url": ""
+  },
+  "Jira": {
+    "EnableIntegration": false,
+    "QueueCapacity": 256,
+    "DispatcherConcurrency": 1,
+    "UseMockClient": true,
+    "BaseUrl": "https://example.atlassian.net",
+    "ProjectKey": "LOG",
+    "IssueTypeName": "Task",
+    "RequestTimeoutSeconds": 60,
+    "MaxRetries": 3,
+    "RetryBaseMilliseconds": 400,
+    "AuthKind": "BasicEmailApiToken",
+    "Email": "",
+    "ApiToken": "",
+    "PersonalAccessToken": "",
+    "HealthDegradedQueueFillRatio": 0.85
+  },
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  },
+  "AllowedHosts": "*"
+}

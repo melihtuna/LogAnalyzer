@@ -1,107 +1,267 @@
-using System.Globalization;
-
-var random = new Random();
-var serviceNames = new[]
+internal static class Program
 {
-    "OrderService", "PaymentService", "InventoryService", "BillingService", "NotificationService", "ShippingService"
-};
-var requestPaths = new[]
-{
-    "/api/orders/checkout", "/api/payments/capture", "/api/inventory/reserve", "/api/invoices/create", "/api/notifications/send"
-};
+    // eval_* key=value pairs are synthetic benchmark metadata only. Classification must infer from message body and normal signal fields, never from eval_* as ground truth.
 
-var events = new (string Level, Func<Random, string> Build)[]
-{
-    ("ERROR", r => BuildUnhandledException(r)),
-    ("ERROR", r => BuildHttpTimeoutException(r)),
-    ("ERROR", r => BuildDatabaseDeadlock(r)),
-    ("ERROR", r => BuildKafkaProcessingError(r)),
-    ("WARN", r => BuildSlowDependencyWarning(r)),
-    ("WARN", r => BuildCircuitBreakerOpen(r)),
-    ("WARN", r => BuildRetryExhausted(r)),
-    ("INFO", r => BuildSuccessfulRequest(r)),
-};
+    private static readonly string[] Services =
+    {
+        "WebBff", "CheckoutSpaHost", "OrderService", "PaymentService", "InventoryService",
+        "BillingService", "NotificationService", "ShippingService", "IdentityService",
+        "ApiGateway", "SearchIndexer", "AnalyticsCollector",
+    };
 
-while (true)
-{
-    var sample = events[random.Next(events.Length)];
-    var traceId = Guid.NewGuid().ToString("N")[..16];
-    var spanId = Guid.NewGuid().ToString("N")[..16];
-    var service = serviceNames[random.Next(serviceNames.Length)];
-    var path = requestPaths[random.Next(requestPaths.Length)];
-    var timestamp = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture);
-    var payload = sample.Build(random);
+    private static readonly string[] Paths =
+    {
+        "/api/checkout/session", "/api/cart/merge", "/api/orders", "/api/payments/capture",
+        "/api/inventory/reserve", "/api/invoices/create", "/api/notifications/send",
+        "/api/auth/token", "/api/auth/introspect", "/internal/health", "/metrics",
+        "/api/partners/webhook", "/graphql", "/cdn/asset-manifest",
+    };
 
-    Console.WriteLine(
-        $"{timestamp} {sample.Level} [{service}] trace_id={traceId} span_id={spanId} path={path} " +
-        $"request_id=req-{traceId[..8]} event=\"{payload}\"");
-    await Task.Delay(TimeSpan.FromSeconds(2));
-}
+    private static readonly (int W, Scenario S)[] Weighted =
+    {
+        (18, new Scenario("INFO", "info", "backend", "routine_success", "none", BuildRoutineSuccess)),
+        (5, new Scenario("WARN", "low", "frontend", "layout_warning", "monitor_only", BuildFrontendHydrationWarning)),
+        (3, new Scenario("ERROR", "high", "frontend", "asset_failure", "no_immediate_action", BuildFrontendChunkLoadFailure)),
+        (4, new Scenario("ERROR", "high", "backend", "unhandled_exception", "no_immediate_action", BuildUnhandledException)),
+        (6, new Scenario("WARN", "low", "backend", "validation_noise", "backlog_candidate", BuildBackendValidationNoise)),
+        (5, new Scenario("INFO", "info", "backend", "idempotent_replay", "monitor_only", BuildBackendIdempotentReplay)),
+        (2, new Scenario("ERROR", "critical", "infrastructure", "compute_pressure", "no_immediate_action", BuildPodOomKilled)),
+        (4, new Scenario("WARN", "medium", "infrastructure", "capacity_signal", "backlog_candidate", BuildDiskPressureWarning)),
+        (3, new Scenario("WARN", "low", "infrastructure", "certificate_warning", "monitor_only", BuildTlsCertExpiring)),
+        (7, new Scenario("WARN", "low", "authentication", "token_rejected", "monitor_only", BuildAuthInvalidToken)),
+        (3, new Scenario("ERROR", "high", "authentication", "token_refresh_failure", "user_impacting_failure", BuildOAuthRefreshStorm)),
+        (4, new Scenario("WARN", "medium", "authentication", "forbidden", "backlog_candidate", BuildPermissionDenied)),
+        (6, new Scenario("ERROR", "medium", "external_service", "upstream_unavailable", "transient_recoverable", BuildPartner503)),
+        (3, new Scenario("ERROR", "high", "external_service", "webhook_integrity", "no_immediate_action", BuildWebhookSignatureFailure)),
+        (5, new Scenario("WARN", "low", "external_service", "rate_limit", "transient_recoverable", BuildExternalRateLimit)),
+        (5, new Scenario("WARN", "info", "warning_noise", "deprecation", "backlog_candidate", BuildDeprecationNoise)),
+        (4, new Scenario("INFO", "info", "warning_noise", "low_signal", "monitor_only", BuildNoisyRetryLogged)),
+        (4, new Scenario("INFO", "low", "backend", "tech_debt_signal", "backlog_candidate", BuildBacklogLintDebt)),
+        (4, new Scenario("ERROR", "medium", "backend", "transient_db", "transient_recoverable", BuildDatabaseDeadlock)),
+        (4, new Scenario("ERROR", "medium", "infrastructure", "messaging", "transient_recoverable", BuildKafkaProcessingError)),
+        (8, new Scenario("WARN", "medium", "backend", "latency_performance", "monitor_only", BuildLatencyP99Spike)),
+        (2, new Scenario("WARN", "high", "backend", "latency_performance", "user_impacting_failure", BuildCacheStampede)),
+        (2, new Scenario("ERROR", "critical", "backend", "payment_failure", "user_impacting_failure", BuildCheckoutPaymentCritical)),
+        (5, new Scenario("ERROR", "medium", "external_service", "timeout", "transient_recoverable", BuildHttpTimeoutException)),
+        (4, new Scenario("WARN", "medium", "external_service", "circuit_open", "monitor_only", BuildCircuitBreakerOpen)),
+        (3, new Scenario("WARN", "high", "external_service", "retry_exhausted", "no_immediate_action", BuildRetryExhausted)),
+    };
 
-static string BuildUnhandledException(Random random)
-{
-    var line = random.Next(30, 240);
-    var nestedLine = random.Next(15, 190);
-    return "Unhandled exception while processing checkout command\\n" +
-           "System.NullReferenceException: Object reference not set to an instance of an object.\\n" +
-           $"   at LogAnalyzer.Api.Services.OrderOrchestrator.ExecuteCheckoutAsync(CheckoutCommand cmd) in /src/LogAnalyzer.Api/Services/OrderOrchestrator.cs:line {line}\\n" +
-           $"   at LogAnalyzer.Api.Controllers.OrderController.PostCheckout(CheckoutRequest request) in /src/LogAnalyzer.Api/Controllers/OrderController.cs:line {nestedLine}\\n" +
-           "   at Microsoft.AspNetCore.Mvc.Infrastructure.ActionMethodExecutor.TaskOfIActionResultExecutor.Execute(...)";
-}
+    private static async Task Main()
+    {
+        var random = new Random();
+        var totalWeight = 0;
+        foreach (var (w, _) in Weighted)
+        {
+            totalWeight += w;
+        }
 
-static string BuildHttpTimeoutException(Random random)
-{
-    var line = random.Next(40, 180);
-    return "Downstream dependency timeout\\n" +
-           "System.TimeoutException: The HTTP request to BillingApi timed out after 10s.\\n" +
-           $"   at LogAnalyzer.Infrastructure.Clients.BillingClient.CapturePaymentAsync(PaymentRequest request) in /src/LogAnalyzer.Infrastructure/Clients/BillingClient.cs:line {line}\\n" +
-           "   at System.Net.Http.HttpClient.<SendAsync>g__Core|83_0(...)\\n" +
-           "Inner exception: System.Net.Sockets.SocketException (110): Connection timed out";
-}
+        while (true)
+        {
+            var pick = random.Next(totalWeight);
+            var scenario = Weighted[0].S;
+            foreach (var (w, s) in Weighted)
+            {
+                pick -= w;
+                if (pick < 0)
+                {
+                    scenario = s;
+                    break;
+                }
+            }
 
-static string BuildDatabaseDeadlock(Random random)
-{
-    var line = random.Next(20, 160);
-    return "Transaction aborted during account update\\n" +
-           "Npgsql.PostgresException (0x80004005): 40P01: deadlock detected\\n" +
-           $"   at LogAnalyzer.Infrastructure.Repositories.AccountRepository.UpdateBalanceAsync(Guid accountId, Decimal delta) in /src/LogAnalyzer.Infrastructure/Repositories/AccountRepository.cs:line {line}\\n" +
-           "   at Microsoft.EntityFrameworkCore.Storage.RelationalCommand.ExecuteReaderAsync(...)";
-}
+            var traceId = Guid.NewGuid().ToString("N")[..16];
+            var spanId = Guid.NewGuid().ToString("N")[..16];
+            var service = Services[random.Next(Services.Length)];
+            var path = Paths[random.Next(Paths.Length)];
+            var payload = scenario.Build(random);
 
-static string BuildKafkaProcessingError(Random random)
-{
-    var line = random.Next(25, 220);
-    return "Kafka consumer failed to process message\\n" +
-           "Confluent.Kafka.ConsumeException: Broker: Unknown topic or partition\\n" +
-           $"   at LogAnalyzer.Processor.Messaging.OrderEventsConsumer.HandleAsync(OrderEvent message) in /src/LogAnalyzer.Processor/Messaging/OrderEventsConsumer.cs:line {line}\\n" +
-           "   at LogAnalyzer.Processor.Messaging.BackgroundConsumer.ExecuteAsync(CancellationToken stoppingToken)";
-}
+            Console.WriteLine(
+                $"{scenario.Level} [{service}] eval_severity={scenario.Severity} eval_scenario_domain={scenario.Domain} " +
+                $"eval_scenario_kind={scenario.Kind} eval_incident_profile={scenario.Profile} trace_id={traceId} span_id={spanId} path={path} " +
+                $"request_id=req-{traceId[..8]} event=\"{payload}\"");
 
-static string BuildSlowDependencyWarning(Random random)
-{
-    var elapsed = random.Next(1500, 6500);
-    return $"Dependency latency high: InventoryApi took {elapsed} ms (p95 threshold 1200 ms). " +
-           "Potential thread pool pressure under peak load.";
-}
+            await Task.Delay(TimeSpan.FromSeconds(2));
+        }
+    }
 
-static string BuildCircuitBreakerOpen(Random random)
-{
-    var openSeconds = random.Next(10, 90);
-    return $"Circuit breaker OPEN for NotificationProvider. Failures=8, OpenFor={openSeconds}s, " +
-           "LastError=HttpRequestException: 503 Service Unavailable.";
-}
+    private readonly record struct Scenario(
+        string Level,
+        string Severity,
+        string Domain,
+        string Kind,
+        string Profile,
+        Func<Random, string> Build);
 
-static string BuildRetryExhausted(Random random)
-{
-    var line = random.Next(35, 140);
-    return "Retry policy exhausted after 3 attempts for webhook dispatch\\n" +
-           $"   at LogAnalyzer.Api.Services.WebhookDispatcher.DeliverAsync(WebhookPayload payload) in /src/LogAnalyzer.Api/Services/WebhookDispatcher.cs:line {line}\\n" +
-           "LastStatusCode=408, Endpoint=https://partner.example.com/webhook/orders";
-}
+    private static string BuildRoutineSuccess(Random random)
+    {
+        var elapsed = random.Next(32, 380);
+        var rows = random.Next(0, 120);
+        return $"request_completed_ms={elapsed} status=200 cache_hit={(elapsed < 95).ToString().ToLowerInvariant()} rows={rows}";
+    }
 
-static string BuildSuccessfulRequest(Random random)
-{
-    var elapsed = random.Next(45, 420);
-    var rows = random.Next(1, 80);
-    return $"Request completed successfully in {elapsed} ms. Response=200, DBRowsAffected={rows}, CacheHit={(elapsed < 120).ToString().ToLowerInvariant()}";
+    private static string BuildFrontendHydrationWarning(Random random)
+    {
+        var route = random.Next(0, 2) == 0 ? "/checkout" : "/account/settings";
+        return $"SSR markup mismatch after navigation route={route} client_build={random.Next(4100, 4199)} server_build={random.Next(4100, 4199)}";
+    }
+
+    private static string BuildFrontendChunkLoadFailure(Random random)
+    {
+        var chunk = random.Next(0, 2) == 0 ? "checkout~vendor" : "account~profile";
+        return $"dynamic_import_failed chunk={chunk} error=ChunkLoadError status=net::ERR_ABORTED retry_scheduled=true";
+    }
+
+    private static string BuildUnhandledException(Random random)
+    {
+        var line = random.Next(30, 240);
+        var nestedLine = random.Next(15, 190);
+        return "Unhandled exception while processing checkout command\\n" +
+               "System.NullReferenceException: Object reference not set to an instance of an object.\\n" +
+               $"   at OrderOrchestrator.ExecuteCheckoutAsync(CheckoutCommand cmd) in /src/Services/OrderOrchestrator.cs:line {line}\\n" +
+               $"   at OrderController.PostCheckout(CheckoutRequest request) in /src/Controllers/OrderController.cs:line {nestedLine}\\n" +
+               "   at Microsoft.AspNetCore.Mvc.Infrastructure.ActionMethodExecutor.TaskOfIActionResultExecutor.Execute(...)";
+    }
+
+    private static string BuildBackendValidationNoise(Random random)
+    {
+        var field = random.Next(0, 3) switch { 0 => "shipping.zip", 1 => "payment.method", _ => "buyer.email" };
+        return $"validation_failed field={field} code=FIELD_INVALID trace_category=noise suppress_alert=true";
+    }
+
+    private static string BuildBackendIdempotentReplay(Random random)
+    {
+        var key = Guid.NewGuid().ToString("N")[..12];
+        return $"idempotent_hit dedupe_key={key} prior_status=201 replay_suppressed=true";
+    }
+
+    private static string BuildPodOomKilled(Random random)
+    {
+        var pod = $"order-service-{random.Next(1, 9)}-{random.Next(10, 99)}";
+        return $"kube_event type=OOMKilled pod={pod} namespace=prod memory_limit_mi=512 restart_policy=Always";
+    }
+
+    private static string BuildDiskPressureWarning(Random random)
+    {
+        var pct = random.Next(82, 96);
+        var mount = random.Next(0, 2) == 0 ? "/var/lib/containerd" : "/data/pg_wal";
+        return $"host_disk_pressure mount={mount} used_percent={pct} watermark_high=85 ticket=INFRA-{random.Next(1000, 9999)}";
+    }
+
+    private static string BuildTlsCertExpiring(Random random)
+    {
+        var days = random.Next(5, 45);
+        return $"tls_certificate_expiry_soon cn=api.example.com days_remaining={days} issuer=PublicCA rotation_ticket=backlog";
+    }
+
+    private static string BuildAuthInvalidToken(Random random)
+    {
+        return $"token_validation_failed reason=signature_invalid aud=checkout-api client_id=spa-{random.Next(100, 999)} outcome=401";
+    }
+
+    private static string BuildOAuthRefreshStorm(Random random)
+    {
+        var region = random.Next(0, 2) == 0 ? "eu-west-1" : "us-east-1";
+        return $"refresh_token_endpoint_errors_spike region={region} error=invalid_grant burst_window_s=120 incidents_open=3";
+    }
+
+    private static string BuildPermissionDenied(Random random)
+    {
+        var scope = random.Next(0, 2) == 0 ? "orders:write" : "billing:read";
+        return $"authorization_denied subject_role=support_ro scope={scope} resource=/api/admin/refunds decision=403";
+    }
+
+    private static string BuildPartner503(Random random)
+    {
+        var host = random.Next(0, 2) == 0 ? "tax-engine.partner.io" : "fraud-score.vendor.net";
+        return $"upstream_http_failure host={host} status=503 attempts=1 retry_after_ms=0 circuit=half_open";
+    }
+
+    private static string BuildWebhookSignatureFailure(Random random)
+    {
+        return $"webhook_signature_mismatch provider=payments_partner endpoint=/hooks/inbound/payments algorithm=HMAC-SHA256";
+    }
+
+    private static string BuildExternalRateLimit(Random random)
+    {
+        return $"upstream_rate_limit host=search-provider.example status=429 retry_after_s={random.Next(2, 60)} quota_bucket=enterprise_tier";
+    }
+
+    private static string BuildDeprecationNoise(Random random)
+    {
+        return $"deprecated_route_called path=/api/v1/legacy-pricing sunset=2026-08-01 callers={random.Next(1, 40)}";
+    }
+
+    private static string BuildNoisyRetryLogged(Random random)
+    {
+        return $"retry_attempt_logged operation=fetch_product_catalog attempt={random.Next(2, 5)} outcome=will_retry backoff_ms={random.Next(50, 400)}";
+    }
+
+    private static string BuildBacklogLintDebt(Random random)
+    {
+        return $"static_analysis_debt module=PricingRules warnings={random.Next(3, 22)} baseline_only=true sprint_candidate=false";
+    }
+
+    private static string BuildDatabaseDeadlock(Random random)
+    {
+        var line = random.Next(20, 160);
+        return "Transaction aborted during account update\\n" +
+               "Npgsql.PostgresException (0x80004005): 40P01: deadlock detected\\n" +
+               $"   at AccountRepository.UpdateBalanceAsync(Guid accountId, Decimal delta) in /src/Repositories/AccountRepository.cs:line {line}\\n" +
+               "   at Microsoft.EntityFrameworkCore.Storage.RelationalCommand.ExecuteReaderAsync(...)";
+    }
+
+    private static string BuildKafkaProcessingError(Random random)
+    {
+        var line = random.Next(25, 220);
+        return "Kafka consumer failed to process message\\n" +
+               "Confluent.Kafka.ConsumeException: Broker: Unknown topic or partition\\n" +
+               $"   at OrderEventsConsumer.HandleAsync(OrderEvent message) in /src/Messaging/OrderEventsConsumer.cs:line {line}\\n" +
+               "   at BackgroundConsumer.ExecuteAsync(CancellationToken stoppingToken)";
+    }
+
+    private static string BuildLatencyP99Spike(Random random)
+    {
+        var ms = random.Next(2200, 9800);
+        return $"latency_objective_breach dependency=InventoryApi observed_p99_ms={ms} slo_ms=1200 window=5m env=prod";
+    }
+
+    private static string BuildCacheStampede(Random random)
+    {
+        var keys = random.Next(800, 12000);
+        return $"cache_stampede_risk hot_key_pattern=catalog:* concurrent_misses={keys} ttl_padding_applied=false";
+    }
+
+    private static string BuildCheckoutPaymentCritical(Random random)
+    {
+        var line = random.Next(55, 190);
+        return "Payment capture declined during checkout\\n" +
+               "PartnerPayments.PaymentDeclinedException: issuer_declined\\n" +
+               $"   at PaymentOrchestrator.CaptureAsync(PaymentCapture cmd) in /src/Payments/PaymentOrchestrator.cs:line {line}\\n" +
+               "   decline_code=05 AVS=n/a amount_currency=EUR";
+    }
+
+    private static string BuildHttpTimeoutException(Random random)
+    {
+        var line = random.Next(40, 180);
+        return "Downstream dependency timeout\\n" +
+               "System.TimeoutException: The HTTP request to BillingApi timed out after 10s.\\n" +
+               $"   at BillingClient.CapturePaymentAsync(PaymentRequest request) in /src/Clients/BillingClient.cs:line {line}\\n" +
+               "   at System.Net.Http.HttpClient.<SendAsync>g__Core|83_0(...)\\n" +
+               "Inner exception: System.Net.Sockets.SocketException (110): Connection timed out";
+    }
+
+    private static string BuildCircuitBreakerOpen(Random random)
+    {
+        var openSeconds = random.Next(10, 90);
+        return $"circuit_breaker_open dependency=NotificationProvider failures=8 open_seconds={openSeconds} last_status=503";
+    }
+
+    private static string BuildRetryExhausted(Random random)
+    {
+        var line = random.Next(35, 140);
+        return "Retry policy exhausted after 3 attempts for webhook dispatch\\n" +
+               $"   at WebhookDispatcher.DeliverAsync(WebhookPayload payload) in /src/Services/WebhookDispatcher.cs:line {line}\\n" +
+               "last_status=408 endpoint=https://partner.example.com/webhook/orders";
+    }
 }
