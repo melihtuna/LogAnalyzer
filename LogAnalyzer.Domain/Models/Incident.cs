@@ -29,6 +29,10 @@ public class Incident
 
     public string TechnicalSummary { get; set; } = string.Empty;
 
+    public string? OperationalTitle { get; set; }
+
+    public string? EvidenceLogExcerpt { get; set; }
+
     public string PossibleRootCause { get; set; } = string.Empty;
 
     public string RecommendedAction { get; set; } = string.Empty;

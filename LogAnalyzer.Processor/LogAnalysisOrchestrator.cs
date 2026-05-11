@@ -63,7 +63,8 @@ public class LogAnalysisOrchestrator(
                     IncidentSource.ApiAdHoc,
                     occurrenceIncrement: 1,
                     classificationCorrelation: null,
-                    cancellationToken).ConfigureAwait(false);
+                    presentation: null,
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
                 incidentOutboundEnqueueCoordinator.TrackIncidentFingerprint(cachedUpsert.IncidentFingerprint);
                 responses.Add(Map(existingRecord, isCached: true));
                 continue;
@@ -100,7 +101,8 @@ public class LogAnalysisOrchestrator(
                     classificationCorrelation: new ClassificationCorrelationSnapshot(
                         aiResult.ClassificationParseMode,
                         aiResult.ClassificationFallbackUsed),
-                    cancellationToken)
+                    presentation: null,
+                    cancellationToken: cancellationToken)
                 .ConfigureAwait(false);
             incidentOutboundEnqueueCoordinator.TrackIncidentFingerprint(freshUpsert.IncidentFingerprint);
             responses.Add(Map(record, isCached: false, isLowConfidence: analysis.IsLowConfidence, rawAiResponse: includeRawAIResponse ? aiResult.RawAIResponse : null));

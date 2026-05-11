@@ -1,7 +1,5 @@
 internal static class Program
 {
-    // eval_* key=value pairs are synthetic benchmark metadata only. Classification must infer from message body and normal signal fields, never from eval_* as ground truth.
-
     private static readonly string[] Services =
     {
         "WebBff", "CheckoutSpaHost", "OrderService", "PaymentService", "InventoryService",
@@ -47,8 +45,14 @@ internal static class Program
         (3, new Scenario("WARN", "high", "external_service", "retry_exhausted", "no_immediate_action", BuildRetryExhausted)),
     };
 
-    private static async Task Main()
+    private static async Task Main(string[] args)
     {
+        if (args is { Length: > 0 } && args.Any(a => string.Equals(a, "--emit-fixed-multi-problem-batch", StringComparison.OrdinalIgnoreCase)))
+        {
+            EmitFixedMultiProblemBatch();
+            return;
+        }
+
         var random = new Random();
         var totalWeight = 0;
         foreach (var (w, _) in Weighted)
@@ -83,6 +87,35 @@ internal static class Program
 
             await Task.Delay(TimeSpan.FromSeconds(2));
         }
+    }
+
+    private static void EmitFixedMultiProblemBatch()
+    {
+        var random = new Random(42);
+
+        var traceId1 = "aaaaaaaaaaaaaaaa";
+        var spanId1 = "bbbbbbbbbbbbbbbb";
+        var payloadDeadlock = BuildDatabaseDeadlock(random);
+        Console.WriteLine(
+            $"ERROR [OrderService] eval_severity=high eval_scenario_domain=backend " +
+            $"trace_id={traceId1} span_id={spanId1} request_id=req-deadlock " +
+            $"path=/api/orders event=\"{payloadDeadlock}\"");
+
+        var traceId2 = "cccccccccccccccc";
+        var spanId2 = "dddddddddddddddd";
+        var payloadTimeout = BuildHttpTimeoutException(random);
+        Console.WriteLine(
+            $"ERROR [PaymentService] eval_severity=high eval_scenario_domain=external_service " +
+            $"trace_id={traceId2} span_id={spanId2} request_id=req-timeout " +
+            $"path=/api/payments/capture event=\"{payloadTimeout}\"");
+
+        var traceId3 = "eeeeeeeeeeeeeeee";
+        var spanId3 = "ffffffffffffffff";
+        var payloadTls = BuildTlsCertExpiring(random);
+        Console.WriteLine(
+            $"WARN [ApiGateway] eval_severity=low eval_scenario_domain=infrastructure " +
+            $"trace_id={traceId3} span_id={spanId3} request_id=req-tls " +
+            $"path=/internal/health event=\"{payloadTls}\"");
     }
 
     private readonly record struct Scenario(

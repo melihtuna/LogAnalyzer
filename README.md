@@ -16,7 +16,7 @@
 | **LogAnalyzer.AppHost** | Runs **LogAnalyzer.Api** locally + Aspire Dashboard. |
 | **Docker Compose** | **Postgres**, **pgAdmin**, **mock-log-producer** (GELF → Graylog). **No API container.** |
 
-**Periodic pipeline:** dedupe → batch uncached lines → one OpenAI call per batch → persist → incident upsert → outbound enqueue when enabled. First cycle **after** `PeriodicAnalysis:IntervalMinutes` (no run at process start).
+**Periodic pipeline:** dedupe → **uncached lines partitioned by operational fingerprint** (evidence-based `groupId`) → **one OpenAI `AnalyzeAsync` per group** (similar lines share one prompt) → **one `LogAnalyses` row per line** (line-hash cache) + **one incident upsert per group** (separate Jira tasks per operational group) → outbound enqueue when enabled. OpenAI call volume capped by **`PeriodicAnalysis:MaxOpenAiCallsPerCycle`**. First cycle **after** `PeriodicAnalysis:IntervalMinutes` (no run at process start).
 
 ---
 
@@ -58,7 +58,7 @@ No `OpenAI__`, `Graylog__`, `Jira__`, `PeriodicAnalysis__`, `ConnectionStrings__
 
 | Concern | Files |
 |---------|--------|
-| **ConnectionStrings**, **OpenAI**, **Graylog** (REST), **PeriodicAnalysis**, **IncidentReuse**, **IncidentAiSnapshot**, **Webhook**, **Jira**, host **Logging** / **AllowedHosts** | **`LogAnalyzer/appsettings.json`** |
+| **ConnectionStrings**, **OpenAI**, **Graylog** (REST), **PeriodicAnalysis** (interval, line caps, **`MaxOpenAiCallsPerCycle`**), **IncidentReuse**, **IncidentAiSnapshot**, **Webhook**, **Jira**, host **Logging** / **AllowedHosts** | **`LogAnalyzer/appsettings.json`** |
 | Local/dev overrides | **`LogAnalyzer/appsettings.Development.json`** (merged over **`appsettings.json`**). For shared repos prefer **`dotnet user-secrets`** instead of committing secrets here. |
 | Secrets (`OpenAI:ApiKey`, `Graylog:ApiToken`, Jira tokens, …) | **`dotnet user-secrets`** on **`LogAnalyzer.Api`** |
 
@@ -83,7 +83,7 @@ dotnet user-secrets set "Graylog:ApiToken" "<token>" --project LogAnalyzer/LogAn
 2. **Graylog** running with a **GELF UDP input** matching producer endpoint (default `udp://host.docker.internal:12201` from inside mock container).
 3. **Visual Studio or** `dotnet run --project LogAnalyzer.AppHost/LogAnalyzer.AppHost.csproj` — API starts; console shows **Aspire Dashboard** URL.
 4. **mock-log-producer** emits structured lines → Graylog indexes them.
-5. **`PeriodicLogAnalysisBackgroundService`** (after first interval) pulls Graylog → OpenAI → **`LogAnalyses` / incidents** (ensure `Graylog:*` + `OpenAI:*` configured).
+5. **`PeriodicLogAnalysisBackgroundService`** (after first interval) pulls Graylog → **per operational group** OpenAI → **`LogAnalyses` / incidents** (ensure `Graylog:*` + `OpenAI:*` configured).
 6. **Jira outbound** — if `Jira:EnableIntegration` is **true**, dispatcher processes queue → mock issue key (**`UseMockClient: true`**) or REST create (**`UseMockClient: false`** + valid auth). Watch logs, `/health`, OTEL meter **`LogAnalyzer.Outbound`**.
 
 Shortcut without Graylog delay: **`POST /api/log/analyze`** with a JSON body (still exercises OpenAI path).
@@ -102,7 +102,7 @@ Ports (typical): Postgres **5432**, pgAdmin **5050**, API **7225/5294** (VS prof
 
 ## OpenAI & Jira
 
-- **OpenAI:** `OpenAI:Model`, caps in **`appsettings.json`**; **`OpenAI:ApiKey`** via user-secrets (never commit real keys in JSON).
+- **OpenAI:** `OpenAI:Model`, caps in **`appsettings.json`**; **`OpenAI:ApiKey`** via user-secrets (never commit real keys in JSON). Optional **`OpenAI:Organization`** / **`OpenAI:Project`** → `OpenAI-Organization` / `OpenAI-Project` request headers when set.
 - **Jira:** **`Jira`** section in appsettings. **`EnableIntegration: false`** → queue/dispatcher idle. **`UseMockClient: true`** → no HTTP; deterministic fake keys. **`UseMockClient: false`** + **`EnableIntegration: true`** → REST; startup validates BaseUrl, ProjectKey, Basic or Bearer auth fields.
 
 ---
@@ -136,7 +136,7 @@ dotnet test LogAnalyzer.Infrastructure.Tests/LogAnalyzer.Infrastructure.Tests.cs
 | Symptom | Check |
 |---------|--------|
 | Startup validation fails | `OpenAI:ApiKey`, `Graylog:BaseUrl`, `Graylog:ApiToken` (**user-secrets** or temporary edits to **`appsettings.Development.json`** — avoid committing secrets). |
-| Periodic never hits OpenAI | Graylog empty/query window; unchanged aggregate log hash; all lines cached; interval not elapsed. |
+| Periodic never hits OpenAI | Graylog empty/query window; unchanged aggregate log hash; all lines cached; interval not elapsed; **`MaxOpenAiCallsPerCycle`** exhausted (remaining uncached lines wait next cycle). |
 | No logs in Graylog from producer | GELF input port/host vs `GRAYLOG_GELF_ADDRESS`; firewall. |
 | `429` on analyze | Analysis queue full (1000). |
 
@@ -155,6 +155,14 @@ Placeholder — align with your organization.
 ---
 
 ## Changelog (series)
+
+### Phase 5 — Periodic per-group AI, fingerprint & Jira presentation (2026-05-11)
+
+- **Periodic analysis (breaking behavior vs. prior batch):** Uncached lines are **clustered by evidence-only operational fingerprint** (`OperationalIncidentFingerprintHeuristics.ComputeGroupIdFromEvidenceOnly` → `ILogGroupingService`). Each cluster gets **its own** `AnalyzeAsync` (similar lines stay in one prompt). **Each line** still gets a **`LogAnalyses`** row keyed by **stable line hash** (cache preserved). **Each cluster** drives **one** incident upsert → **one Jira issue** per operational group (not one mega-batch issue). OpenAI volume per cycle is limited by **`PeriodicAnalysis:MaxOpenAiCallsPerCycle`** (default 16); overflow lines are deferred with a warning.
+- **Removed from periodic:** `EnableMultiCandidate`, single mega-batch `AnalyzeAsync`, and **`AnalyzeBatchCandidatesAsync` / `BatchIncidentCandidates`** cache usage (the table and AI method remain in the solution for other scenarios).
+- **Fingerprint:** Canonical incident grouping is **evidence-derived** (service/component/issue class, TLS CN, SQL state hints); AI candidate titles are no longer part of `groupId` for periodic grouping.
+- **Incidents & Jira:** `Incidents` gained **`OperationalTitle`** and **`EvidenceLogExcerpt`** (migration `AddIncidentOperationalPresentationFields`); periodic upserts pass **`IncidentUpsertPresentation`**. **`JiraIssueDescriptionFormatter`** adds optional **Operational title** / **Evidence** sections, uses **`OperationalTitle`** for the Jira issue summary when present, and labels model text **AI technical summary**.
+- **OpenAI HTTP:** Optional **`OpenAI:Organization`** and **`OpenAI:Project`** configuration maps to OpenAI platform headers.
 
 ### Phase 4c — Config boundary cleanup (2026-05-10)
 

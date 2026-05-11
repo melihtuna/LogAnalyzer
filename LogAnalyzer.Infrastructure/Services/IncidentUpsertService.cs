@@ -24,6 +24,7 @@ public sealed class IncidentUpsertService(
         IncidentSource source,
         int occurrenceIncrement = 1,
         ClassificationCorrelationSnapshot? classificationCorrelation = null,
+        IncidentUpsertPresentation? presentation = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(record);
@@ -55,6 +56,8 @@ public sealed class IncidentUpsertService(
                 Category = IncidentClassificationMapper.MapCategory(record.Category),
                 Severity = IncidentClassificationMapper.MapSeverity(record.Severity),
                 TechnicalSummary = record.Summary,
+                OperationalTitle = NormalizeOptional(presentation?.OperationalTitle),
+                EvidenceLogExcerpt = NormalizeOptional(presentation?.EvidenceLogExcerpt),
                 PossibleRootCause = record.PossibleRootCause,
                 RecommendedAction = record.Suggestion,
                 Confidence = record.Confidence,
@@ -88,6 +91,16 @@ public sealed class IncidentUpsertService(
         incident.Category = IncidentClassificationMapper.MapCategory(record.Category);
         incident.Severity = IncidentClassificationMapper.MapSeverity(record.Severity);
         incident.TechnicalSummary = record.Summary;
+        if (presentation?.OperationalTitle is not null)
+        {
+            incident.OperationalTitle = NormalizeOptional(presentation.OperationalTitle);
+        }
+
+        if (presentation?.EvidenceLogExcerpt is not null)
+        {
+            incident.EvidenceLogExcerpt = NormalizeOptional(presentation.EvidenceLogExcerpt);
+        }
+
         incident.PossibleRootCause = record.PossibleRootCause;
         incident.RecommendedAction = record.Suggestion;
         incident.Confidence = record.Confidence;
@@ -207,6 +220,17 @@ public sealed class IncidentUpsertService(
         return await incidentRepository
             .FindActiveWithinWindowAsync(fingerprint, window, cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    private static string? NormalizeOptional(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        var t = value.Trim();
+        return t.Length == 0 ? null : t;
     }
 
     private static void AddEvidenceLink(Incident incident, string logHash, DateTime linkedUtc)

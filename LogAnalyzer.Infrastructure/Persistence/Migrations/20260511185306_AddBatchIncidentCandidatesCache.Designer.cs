@@ -3,6 +3,7 @@ using System;
 using LogAnalyzer.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace LogAnalyzer.Infrastructure.Persistence.Migrations
 {
     [DbContext(typeof(LogAnalyzerDbContext))]
-    partial class LogAnalyzerDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260511185306_AddBatchIncidentCandidatesCache")]
+    partial class AddBatchIncidentCandidatesCache
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -43,9 +46,6 @@ namespace LogAnalyzer.Infrastructure.Persistence.Migrations
                     b.Property<double>("Confidence")
                         .HasColumnType("double precision");
 
-                    b.Property<string>("EvidenceLogExcerpt")
-                        .HasColumnType("text");
-
                     b.Property<string>("ExternalIssueKey")
                         .HasMaxLength(64)
                         .HasColumnType("character varying(64)");
@@ -72,9 +72,6 @@ namespace LogAnalyzer.Infrastructure.Persistence.Migrations
 
                     b.Property<int>("OccurrenceCount")
                         .HasColumnType("integer");
-
-                    b.Property<string>("OperationalTitle")
-                        .HasColumnType("text");
 
                     b.Property<string>("PipelineVersion")
                         .IsRequired()

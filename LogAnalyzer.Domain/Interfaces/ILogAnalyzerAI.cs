@@ -5,4 +5,8 @@ namespace LogAnalyzer.Domain.Interfaces;
 public interface ILogAnalyzerAI
 {
     Task<LogAnalysisResult> AnalyzeAsync(string log, CancellationToken cancellationToken = default);
+
+    Task<LogAnalysisBatchCandidatesResult> AnalyzeBatchCandidatesAsync(
+        string log,
+        CancellationToken cancellationToken = default);
 }

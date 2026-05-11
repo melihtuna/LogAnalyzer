@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Globalization;
 using LogAnalyzer.Domain.Models;
 
@@ -11,7 +12,9 @@ public sealed class JiraIssueDescriptionFormatter : IJiraIssueDescriptionFormatt
     internal static readonly string[] SummarySectionOrder =
     [
         "Incident metadata",
-        "Summary",
+        "Operational title",
+        "Evidence (scoped log excerpt)",
+        "AI technical summary",
         "Possible root cause",
         "Recommended action",
         "Classification / pipeline audit",
@@ -29,9 +32,11 @@ public sealed class JiraIssueDescriptionFormatter : IJiraIssueDescriptionFormatt
 
     internal static string NormalizeSummary(Incident incident)
     {
-        var raw = string.IsNullOrWhiteSpace(incident.TechnicalSummary)
-            ? FormattableString.Invariant($"Incident {incident.Id}")
-            : incident.TechnicalSummary.Trim();
+        var raw = !string.IsNullOrWhiteSpace(incident.OperationalTitle)
+            ? incident.OperationalTitle.Trim()
+            : string.IsNullOrWhiteSpace(incident.TechnicalSummary)
+                ? FormattableString.Invariant($"Incident {incident.Id}")
+                : incident.TechnicalSummary.Trim();
 
         raw = CollapseWhitespace(raw);
 
@@ -78,6 +83,24 @@ public sealed class JiraIssueDescriptionFormatter : IJiraIssueDescriptionFormatt
                 FormattableString.Invariant($"  Status: {incident.Status}"),
                 JiraIssueFormattingLimits.MetadataSectionMaxLength);
 
+        var blocks = new List<string> { meta };
+
+        if (!string.IsNullOrWhiteSpace(incident.OperationalTitle))
+        {
+            var titleBlock = TruncateBlock(
+                incident.OperationalTitle.Trim(),
+                JiraIssueFormattingLimits.TechnicalSummaryMaxLength);
+            blocks.Add($"{SummarySectionOrder[1]}:\n{titleBlock}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(incident.EvidenceLogExcerpt))
+        {
+            var evidence = TruncateBlock(
+                incident.EvidenceLogExcerpt.Trim(),
+                JiraIssueFormattingLimits.EvidenceLogExcerptMaxLength);
+            blocks.Add($"{SummarySectionOrder[2]}:\n{evidence}");
+        }
+
         var summaryBody = TruncateBlock(incident.TechnicalSummary ?? string.Empty, JiraIssueFormattingLimits.TechnicalSummaryMaxLength);
 
         var rootCause = TruncateBlock(incident.PossibleRootCause ?? string.Empty, JiraIssueFormattingLimits.PossibleRootCauseMaxLength);
@@ -85,7 +108,7 @@ public sealed class JiraIssueDescriptionFormatter : IJiraIssueDescriptionFormatt
         var action = TruncateBlock(incident.RecommendedAction ?? string.Empty, JiraIssueFormattingLimits.RecommendedActionMaxLength);
 
         var audit =
-            $"{SummarySectionOrder[4]}:\n"
+            $"{SummarySectionOrder[6]}:\n"
             + TruncateLine($"  Confidence: {confidenceText}", JiraIssueFormattingLimits.AuditLinesMaxLength)
             + "\n"
             + TruncateLine($"  AiModel: {incident.AiModel}", JiraIssueFormattingLimits.AuditLinesMaxLength)
@@ -94,13 +117,12 @@ public sealed class JiraIssueDescriptionFormatter : IJiraIssueDescriptionFormatt
             + "\n"
             + TruncateLine($"  PipelineVersion: {incident.PipelineVersion}", JiraIssueFormattingLimits.AuditLinesMaxLength);
 
-        return string.Join(
-            "\n\n",
-            meta,
-            $"{SummarySectionOrder[1]}:\n{summaryBody}",
-            $"{SummarySectionOrder[2]}:\n{rootCause}",
-            $"{SummarySectionOrder[3]}:\n{action}",
-            audit);
+        blocks.Add($"{SummarySectionOrder[3]}:\n{summaryBody}");
+        blocks.Add($"{SummarySectionOrder[4]}:\n{rootCause}");
+        blocks.Add($"{SummarySectionOrder[5]}:\n{action}");
+        blocks.Add(audit);
+
+        return string.Join("\n\n", blocks);
     }
 
     private static string CollapseWhitespace(string value)

@@ -10,7 +10,11 @@ public sealed class JiraIssueDescriptionFormatterTests
     [Fact]
     public void Format_preserves_fixed_section_order_in_plain_description()
     {
-        var incident = IncidentTestFactory.CreateMinimal();
+        var incident = IncidentTestFactory.CreateMinimal(i =>
+        {
+            i.OperationalTitle = "Inventory API timeout";
+            i.EvidenceLogExcerpt = "ERR inventory timeout after 30s";
+        });
         var description = JiraIssueDescriptionFormatter.BuildPlainDescription(incident);
 
         var headings = new[]
@@ -20,6 +24,8 @@ public sealed class JiraIssueDescriptionFormatterTests
             $"{JiraIssueDescriptionFormatter.SummarySectionOrder[2]}:",
             $"{JiraIssueDescriptionFormatter.SummarySectionOrder[3]}:",
             $"{JiraIssueDescriptionFormatter.SummarySectionOrder[4]}:",
+            $"{JiraIssueDescriptionFormatter.SummarySectionOrder[5]}:",
+            $"{JiraIssueDescriptionFormatter.SummarySectionOrder[6]}:",
         };
 
         var indices = headings.Select(h => description.IndexOf(h, StringComparison.Ordinal)).ToArray();
@@ -38,6 +44,19 @@ public sealed class JiraIssueDescriptionFormatterTests
 
         var summary = JiraIssueDescriptionFormatter.NormalizeSummary(incident);
         Assert.Equal("hello world foo bar", summary);
+    }
+
+    [Fact]
+    public void NormalizeSummary_prefers_operational_title_when_set()
+    {
+        var incident = IncidentTestFactory.CreateMinimal(i =>
+        {
+            i.OperationalTitle = "  Payment capture declined  ";
+            i.TechnicalSummary = "Long merged narrative about many systems.";
+        });
+
+        var summary = JiraIssueDescriptionFormatter.NormalizeSummary(incident);
+        Assert.Equal("Payment capture declined", summary);
     }
 
     [Fact]

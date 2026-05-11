@@ -19,6 +19,7 @@ public class LogAnalyzerDbContext(DbContextOptions<LogAnalyzerDbContext> options
     public DbSet<LogSourceCheckpoint> LogSourceCheckpoints => Set<LogSourceCheckpoint>();
     public DbSet<Incident> Incidents => Set<Incident>();
     public DbSet<IncidentLogLink> IncidentLogLinks => Set<IncidentLogLink>();
+    public DbSet<BatchIncidentCandidatesCache> BatchIncidentCandidates => Set<BatchIncidentCandidatesCache>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -68,6 +69,8 @@ public class LogAnalyzerDbContext(DbContextOptions<LogAnalyzerDbContext> options
             entity.Property(x => x.Severity).HasConversion<string>().HasMaxLength(32).IsRequired();
             entity.Property(x => x.Source).HasConversion<string>().HasMaxLength(32).IsRequired();
             entity.Property(x => x.TechnicalSummary).IsRequired();
+            entity.Property(x => x.OperationalTitle);
+            entity.Property(x => x.EvidenceLogExcerpt);
             entity.Property(x => x.PossibleRootCause).IsRequired();
             entity.Property(x => x.RecommendedAction).IsRequired();
             entity.Property(x => x.AiModel).HasMaxLength(128).IsRequired();
@@ -90,6 +93,17 @@ public class LogAnalyzerDbContext(DbContextOptions<LogAnalyzerDbContext> options
                 .WithMany(i => i.LogLinks)
                 .HasForeignKey(x => x.IncidentId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<BatchIncidentCandidatesCache>(entity =>
+        {
+            entity.HasKey(x => x.Id);
+            entity.HasIndex(x => new { x.BatchHash, x.ContractVersion }).IsUnique();
+            entity.Property(x => x.BatchHash).HasMaxLength(128).IsRequired();
+            entity.Property(x => x.ContractVersion).HasMaxLength(16).IsRequired();
+            entity.Property(x => x.CandidatesJson).IsRequired();
+            entity.Property(x => x.CreatedUtc).IsRequired();
+            entity.Property(x => x.LastSeenUtc).IsRequired();
         });
     }
 }

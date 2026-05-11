@@ -10,6 +10,7 @@ public interface IIncidentUpsertService
         IncidentSource source,
         int occurrenceIncrement = 1,
         ClassificationCorrelationSnapshot? classificationCorrelation = null,
+        IncidentUpsertPresentation? presentation = null,
         CancellationToken cancellationToken = default);
 }
 

@@ -31,6 +31,17 @@ public partial class OpenAiLogAnalyzer
             })
         };
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+        var organization = configuration["OpenAI:Organization"]?.Trim();
+        if (!string.IsNullOrEmpty(organization))
+        {
+            request.Headers.TryAddWithoutValidation("OpenAI-Organization", organization);
+        }
+
+        var project = configuration["OpenAI:Project"]?.Trim();
+        if (!string.IsNullOrEmpty(project))
+        {
+            request.Headers.TryAddWithoutValidation("OpenAI-Project", project);
+        }
 
         using var response = await SendWithRateLimitRetryAsync(request, cancellationToken).ConfigureAwait(false);
         var responseBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);

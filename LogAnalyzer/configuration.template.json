@@ -5,6 +5,8 @@
   "OpenAI": {
     "ApiKey": "",
     "Model": "gpt-4o-mini",
+    "Organization": "",
+    "Project": "",
     "MaxLogCharacters": 8000,
     "MaxPromptLogCharacters": 65536
   },
@@ -22,7 +24,8 @@
   "PeriodicAnalysis": {
     "IntervalMinutes": 5,
     "MaxDistinctLines": 60,
-    "MaxLinesSentToOpenAi": 12
+    "MaxLinesSentToOpenAi": 12,
+    "MaxOpenAiCallsPerCycle": 16
   },
   "IncidentReuse": {
     "ReuseWindowMinutes": 1440

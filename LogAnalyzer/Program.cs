@@ -50,6 +50,7 @@ builder.Services.AddScoped<ILogSourceCheckpointRepository, LogSourceCheckpointRe
 builder.Services.AddSingleton<IIncidentFingerprintGenerator, IncidentFingerprintGenerator>();
 builder.Services.AddScoped<IIncidentRepository, IncidentRepository>();
 builder.Services.AddScoped<IIncidentUpsertService, IncidentUpsertService>();
+builder.Services.AddScoped<IBatchIncidentCandidatesRepository, BatchIncidentCandidatesRepository>();
 builder.Services.AddSingleton<ILogFingerprintService, Sha256LogFingerprintService>();
 builder.Services.AddSingleton<ILogGroupingService, SimpleLogGroupingService>();
 builder.Services.AddSingleton<ILogParser, LogParser>();
