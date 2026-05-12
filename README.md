@@ -156,7 +156,7 @@ Placeholder — align with your organization.
 
 ## Changelog (series)
 
-### Phase 5 — Periodic per-group AI, fingerprint & Jira presentation (2026-05-11)
+### Phase 4d — Periodic per-group AI, fingerprint & Jira presentation (2026-05-11)
 
 - **Periodic analysis (breaking behavior vs. prior batch):** Uncached lines are **clustered by evidence-only operational fingerprint** (`OperationalIncidentFingerprintHeuristics.ComputeGroupIdFromEvidenceOnly` → `ILogGroupingService`). Each cluster gets **its own** `AnalyzeAsync` (similar lines stay in one prompt). **Each line** still gets a **`LogAnalyses`** row keyed by **stable line hash** (cache preserved). **Each cluster** drives **one** incident upsert → **one Jira issue** per operational group (not one mega-batch issue). OpenAI volume per cycle is limited by **`PeriodicAnalysis:MaxOpenAiCallsPerCycle`** (default 16); overflow lines are deferred with a warning.
 - **Removed from periodic:** `EnableMultiCandidate`, single mega-batch `AnalyzeAsync`, and **`AnalyzeBatchCandidatesAsync` / `BatchIncidentCandidates`** cache usage (the table and AI method remain in the solution for other scenarios).
